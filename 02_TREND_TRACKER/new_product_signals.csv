@@ -1,0 +1,23 @@
+Week,Version,Country,SignalType,Signal,Observation,EvidenceCount,Brands,Condition,Confidence,VsPrevWeek,Status,Note
+2026-W38,v1,KR,Claim,소수점 단위 정량 효능 클레임,178.96%/96%/500000ppm/99% 표기,3,동국제약 센텔리안24;스킨1004;이옴,미적용,Strong(구기준),New,Superseded,v2에서 Confidence Medium으로 재판정
+2026-W38,v1,KR,Ingredient,보툴리눔 유사 펩타이드,보타이드;TECA-Toc,2,이옴;동국제약 센텔리안24,미적용,Moderate(구기준),New,Superseded,v2에서 조건 미달 → Watch Item 강등
+2026-W38,v1,KR,Ingredient,NAD,이옴 NAD 99%,1,이옴,미적용,Weak(구기준),New,Superseded,v2에서 조건 미달 → Watch Item 강등
+2026-W38,v1,KR,Format,무수 개별포장 분말 / 변색 하이드로겔,스킨1004;이옴,2,스킨1004;이옴,미적용,Moderate(구기준),New,Superseded,v2 미채택
+2026-W38,v1,KR,Price,신제품 가격 비공개,국내 신제품 기사 9건 전체,9,전체,미적용,Strong(구기준),New,Retracted,범주 오류 — 시장 신호가 아닌 수집 커버리지 지표. v2에서 Coverage Log로 이동
+2026-W38,v1,KR,Channel,올리브영 외 채널 분산,무신사;백화점,2,비노트;토코보,미적용,Weak(구기준),New,Superseded,v2 미채택
+2026-W38,v1,US,Technology,BEMT 신규 자외선 차단 필터 확산,Ultra Violette→Neutrogena,2,Ultra Violette;Neutrogena,미적용,Moderate(구기준),New,Superseded,v2에서 조건 B 충족 확인 후 Medium 유지
+2026-W38,v1,US,Ingredient,비건 PDRN + NAD+ 프레스티지 진입,D&G Ever-Youth,1,Dolce&Gabbana Beauty,미적용,Weak(구기준),New,Superseded,v2에서 Watch Item 강등
+2026-W38,v1,US,Claim,작용기전 서술형 소구,NAD+ 부스팅·세포 재생,1,Dolce&Gabbana Beauty,미적용,Weak(구기준),New,Superseded,v2 미채택
+2026-W38,v1,US,Channel,창업자·셀럽 D2C 신규 브랜드,beecee;Reale Actives,2,beecee;Reale Actives,미적용,Moderate(구기준),New,Superseded,v2에서 Watch Item 강등
+2026-W38,v1,US,Price,가격 양극화,$24 vs $110~170,2,beecee;Dolce&Gabbana Beauty,미적용,Moderate(구기준),New,Superseded,v2 미채택
+2026-W38,v1,JP,Channel,9/18 데파코스 가을 일괄 출시,5개 브랜드 동일 출시일,5,알비온;톰포드뷰티;질스튜어트뷰티;엘레강스;코스메데코르테,미적용,Strong(구기준),New,Retracted,계절성 미검증 — v2에서 Low로 하향하고 Signal 제외
+2026-W38,v1,JP,Price,가격 이원화,¥1760~2640 vs ¥5500~8470,4,토리든;msh;알비온;톰포드뷰티,미적용,Moderate(구기준),New,Superseded,v2에서 조건 A 충족 확인 후 Medium
+2026-W38,v1,JP,Ingredient,히알루론산+세라마이드 보습 기본기,토리든 Dive 라인,1,토리든,미적용,Weak(구기준),New,Superseded,v2 미채택
+2026-W38,v2,KR,Claim,정량 효능 클레임,178.96%(탄력)/96%(비타민C)/500000ppm/99%(NAD)/36%(커버 두께) 표기,4,이옴;동국제약 센텔리안24;스킨1004;AGE20'S,A(브랜드 3건+),Medium,Continued,Adopted,근거 전부 Tier 3·전년 동기 비교 없음 → High 미부여
+2026-W38,v2,US,Technology,BEMT 신규 UV 필터 확산,프레스티지(Ultra Violette)→매스(Neutrogena) 2주 내 하강,2+FDA승인,Ultra Violette;Neutrogena,B(제품 2건+Tier1 규제근거),Medium,Continued,Adopted,제품 근거가 Tier 3 유료 프리뷰라 High 미부여
+2026-W38,v2,JP,Price,가격대 이원화,K뷰티·매스 ¥1760~2640 vs 데파코스 ¥5500~8470 중간대 공백,4,토리든;msh;알비온;톰포드뷰티,A(브랜드 3건+),Medium,Continued,Adopted,가격 4건 전부 Verified·@cosme(Tier1 리테일) 근거이나 1주 관찰
+2026-W38,v2,KR,Ingredient,NAD·NMN,이옴 NAD 99% + 주간 리뷰가 NAD+·NMN 반복 성분 지목,1+매체1,이옴,조건 미달,—,—,WatchItem,독립 브랜드 3건 또는 2건+Tier1/2 근거 시 승격
+2026-W38,v2,KR,Ingredient,보툴리눔 유사 펩타이드,보타이드;TECA-Toc,2,이옴;동국제약 센텔리안24,조건 미달,—,—,WatchItem,Tier1/2 시장 근거 또는 브랜드 3개 시 승격
+2026-W38,v2,US,Ingredient,비건 PDRN 글로벌 프레스티지 채택,D&G Ever-Youth에 비건 PDRN,1,Dolce&Gabbana Beauty,조건 미달,—,—,WatchItem,추가 글로벌 브랜드 1건 이상 시 승격
+2026-W38,v2,US,Channel,셀럽·창업자 D2C 신규 브랜드,beecee;Reale Actives,2,beecee;Reale Actives,조건 미달,—,—,WatchItem,시장 규모·점유율 근거 필요
+2026-W38,v2,JP,Channel,9/18 데파코스 일괄 출시,알비온·톰포드 등 9/18 집중,2(제외분 포함 5),알비온;톰포드뷰티,계절성 미분리,Low,—,Rejected,연례 계절 패턴 가능성 — 전년 9월 데이터 대조 필요

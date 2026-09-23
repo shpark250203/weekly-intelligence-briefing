@@ -1,0 +1,56 @@
+# ── OAuth / 인증정보 (절대 commit 금지) ─────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+
+credentials.json
+credentials*.json
+client_secret*.json
+client_secret*
+token.json
+token*.json
+*token*.json
+*.token
+refresh_token*
+access_token*
+oauth*.json
+service-account*.json
+
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 인증 관련 디렉터리
+.credentials/
+.secrets/
+secrets/
+.auth/
+
+# ── 발송 설정 중 민감 항목 ──────────────────────────────────────
+00_SYSTEM/delivery_credentials*
+**/recipients.private.*
+**/*.private.*
+
+# 수신 주소는 저장소에 두지 않는다. 환경변수(WIB_RECIPIENT)로만 전달한다.
+.env.local
+recipient.txt
+
+# ── 작업 부산물 ─────────────────────────────────────────────────
+.cache/
+tmp/
+*.tmp
+*.log
+
+# ── OS / 편집기 ─────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# 주의
+# - 인증 토큰은 Claude Gmail 커넥터가 관리하며 이 폴더에 저장되지 않는다.
+# - 이 저장소에는 어떤 인증정보도 두지 않는다. Secret은 커밋 대상이 아니다.
+# - 수신 메일 주소도 저장소에 하드코딩하지 않는다(환경변수로만 전달).

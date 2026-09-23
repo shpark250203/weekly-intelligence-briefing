@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weekly Intelligence Brief 2026-W38 v2</title>
+<style>
+  :root{
+    --bg:#fbfaf8; --surface:#ffffff; --ink:#1c1b19; --muted:#6b6862;
+    --line:#e5e1da; --accent:#8a5a2b; --accent-soft:#f3ece3;
+    --fact:#2f6b4f; --claim:#a0522d; --media:#5a6b8a; --analysis:#6b4f8a; --warn:#b3261e;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#17161a; --surface:#1f1e23; --ink:#eceaf0; --muted:#a09daa;
+      --line:#34323b; --accent:#d9a86c; --accent-soft:#2a2620;
+      --fact:#7fc4a0; --claim:#d9a06c; --media:#9db0d6; --analysis:#b79ad9; --warn:#ef9a93;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#17161a; --surface:#1f1e23; --ink:#eceaf0; --muted:#a09daa;
+    --line:#34323b; --accent:#d9a86c; --accent-soft:#2a2620;
+    --fact:#7fc4a0; --claim:#d9a06c; --media:#9db0d6; --analysis:#b79ad9; --warn:#ef9a93;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;
+    font-size:15px;line-height:1.62}
+  .wrap{max-width:920px;margin:0 auto;padding-block:30px;padding-left:20px;padding-right:20px}
+  header.brief{border-bottom:3px solid var(--accent);padding-bottom:16px;margin-bottom:24px}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:700}
+  .v2{background:var(--accent);color:var(--bg);padding:1px 7px;border-radius:3px;font-size:11px;margin-left:6px;letter-spacing:.06em}
+  h1{font-size:25px;margin:6px 0 10px;line-height:1.25;letter-spacing:-.01em}
+  .meta{font-size:13px;color:var(--muted);display:grid;gap:2px}
+  .meta b{color:var(--ink);font-weight:600}
+  h2{font-size:18px;margin:34px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:14.5px;margin:20px 0 7px;color:var(--accent)}
+  h4{font-size:13.5px;margin:16px 0 5px}
+  p{margin:7px 0} ul{margin:7px 0;padding-left:19px} li{margin:4px 0}
+  a{color:var(--accent)}
+  .note{background:var(--accent-soft);border-left:3px solid var(--accent);padding:11px 13px;border-radius:0 6px 6px 0;font-size:13px;margin:12px 0}
+  .tablewrap{overflow-x:auto;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:520px}
+  th,td{padding:8px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+  th{background:var(--accent-soft);font-weight:700;font-size:11.5px;white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  .num{font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:3px;border:1px solid currentColor;white-space:nowrap}
+  .t-fact{color:var(--fact)} .t-claim{color:var(--claim)} .t-media{color:var(--media)} .t-analysis{color:var(--analysis)}
+  .v-ok{color:var(--fact);font-weight:700;font-size:11.5px}
+  .v-mid{color:var(--claim);font-weight:700;font-size:11.5px}
+  .v-no{color:var(--warn);font-weight:700;font-size:11.5px}
+  .must td:first-child{font-weight:800;color:var(--accent);text-align:center;width:30px}
+  .analysis{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--analysis);padding:10px 13px;border-radius:0 6px 6px 0;font-size:13px;margin:11px 0}
+  .excluded{font-size:12.5px;color:var(--muted);background:var(--surface);border:1px dashed var(--line);padding:9px 12px;border-radius:6px;margin:10px 0}
+  .status{font-weight:700;font-size:11.5px}
+  .s-ok{color:var(--fact)} .s-part{color:var(--claim)} .s-block{color:var(--warn)} .s-none{color:var(--muted)}
+  .src{font-size:12px;color:var(--muted)}
+  footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+  .legend{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="brief">
+  <div class="kicker">Weekly Intelligence Brief<span class="v2">v2</span></div>
+  <h1>2026-W38 · 9월 14일 ~ 9월 20일</h1>
+  <div class="meta">
+    <div><b>Coverage</b> 2026-09-14(월) 00:00 ~ 2026-09-20(일) 23:59 KST</div>
+    <div><b>Issued</b> 2026-09-23 · 파일럿 재실행 (v1 QA 반영)</div>
+    <div><b>Ruleset</b> Noise Filter · 2-of-5 Rule · Tier 1 First · URL Traceability · Trend Signal 조건 A·B</div>
+    <div><b>상태</b> Gmail 발송·자동 스케줄 미적용</div>
+  </div>
+  <div class="legend">
+    <span class="tag t-fact">FACT</span><span class="tag t-claim">COMPANY CLAIM</span>
+    <span class="tag t-media">MEDIA INTERPRETATION</span><span class="tag t-analysis">ANALYSIS</span>
+    <span class="v-ok">T1 verified</span><span class="v-mid">T1 via T2</span><span class="v-no">T1 not verified</span>
+  </div>
+</header>
+
+<h2>1. WEEKLY MUST KNOW (7건)</h2>
+<p class="src">인과관계로 묶인 항목은 병합했고, 2-of-5 Rule 미달 항목은 제외했다. 억지로 10개를 채우지 않았다.</p>
+<div class="tablewrap">
+<table class="must">
+<thead><tr><th>#</th><th>이슈</th><th>핵심 내용</th><th>Why it matters</th><th>검증</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><b>연준 금리 인상 → 원화 1,380원대</b></td>
+<td>9/16 FOMC <b>25bp 인상, 3.75~4.00%</b>. 2023년 이후 첫 인상, <b>표결 12-0</b>. 성명: "Inflation remains elevated", 이번 조치가 "2% 목표로의 더 시의적절한 복귀를 지원". 9/18 원/달러 장중 1,387.10원 · 종가 1,383.3원 <span class="tag t-fact">FACT</span></td>
+<td>완화 사이클 종료. <b>조달비용·환율·수입 원부자재 단가 전제가 동시에 바뀐다.</b> 수출 비중이 커진 화장품에는 환율이 양면으로 작용</td>
+<td><span class="v-ok">T1 verified</span><br><a href="https://www.federalreserve.gov/newsevents/pressreleases/monetary20260916a.htm">FOMC 성명 원문</a></td></tr>
+
+<tr><td>2</td><td><b>중국 8월 — 소비 부진·투자 급감</b></td>
+<td>9/15 국가통계국 발표. 소매판매 <b>+0.4%</b>(전망 0.8%, 7월 0.6%), 산업생산 <b>+5.2%</b>(전망 4.8%), 1~8월 고정자산투자 <b>-7.2%</b>(1~7월 -6.7%) <span class="tag t-fact">FACT</span></td>
+<td><b>생산은 되는데 소비가 안 된다.</b> 중국 내수 회복을 전제한 모든 계획의 근거가 약해진다</td>
+<td><span class="v-mid">T1 via T2</span><br><a href="https://www.cnbc.com/2026/09/15/china-august-retail-sales-industrial-output-investment-exports-.html">CNBC</a></td></tr>
+
+<tr><td>3</td><td><b>코스피 6,894.23 — 반도체 주도 급반등</b></td>
+<td>9/18 <b>+178.82p(+2.66%)</b>. 삼성전자 +3%대 26만원 회복(7거래일 만), SK하이닉스 +5% 180만원대. 미 10년물 5%→4%대 하락 <span class="tag t-fact">FACT</span></td>
+<td>금리 인상 직후인데 지수가 올랐다. <b>인상 충격을 금리 되돌림·반도체 실적이 상쇄</b>한 구조</td>
+<td><span class="v-no">T1 not verified</span><br>⚠️ 수급 출처 불일치 — §6</td></tr>
+
+<tr><td>4</td><td><b>서울 시내버스 파업 철회 — 임금 3.2%</b></td>
+<td>9/16 01:50 서울지노위 조정안 수용. 12시간 협상. 전년 2.9% 대비 +0.3%p. <b>통상임금 산정 기준 시간은 미합의</b> <span class="tag t-fact">FACT</span></td>
+<td>출근길 대란은 피했으나 <b>핵심 쟁점이 이월</b>됐다. 동일 쟁점이 다음 교섭에서 재점화된다</td>
+<td><span class="v-mid">T1 via T2</span><br><a href="https://www.mt.co.kr/policy/2026/09/16/2026091600473290255">머니투데이</a></td></tr>
+
+<tr><td>5</td><td><b>식약처, 세계 첫 화장품 규제협의체 초대 의장국</b></td>
+<td><b>GCORAS</b>(글로벌 화장품 규제기관장 협의체). <b>13개국 16개 규제기관</b>, <b>만장일치 의장국 선출</b>, 상설사무국 식약처 내 설치, <b>'2026 서울 이니셔티브'</b> 채택 <span class="tag t-fact">FACT</span><br>⚠️ <b>미국·중국·일본·프랑스 불참</b> <span class="tag t-media">MEDIA</span></td>
+<td>신흥시장 규제 표준을 <b>만드는 쪽</b>에 섰다. 다만 주요 4개국 불참으로 <b>실효 범위는 신흥시장에 한정</b></td>
+<td><span class="v-mid">T1 via T2</span><br><a href="https://www.cosinkorea.com/news/article.html?no=58320">코스인코리아</a> · <a href="https://www.kmjournal.net/news/articleView.html?idxno=13593">KMJ</a></td></tr>
+
+<tr><td>6</td><td><b>화장품 수출, 중국에서 유럽·북미로 이동</b></td>
+<td>7월 수출 <b>13.51억 달러(+37.8%)</b>, 1~7월 누적 83.29억(+28.5%) — 모두 최대치. 7월 <b>유럽 +135%</b>, 미·캐 +45%, 중남미 +105%, 중화권 +16% <span class="tag t-fact">FACT</span><br><b>[배경]</b> 9/1~10 4.01억 달러(+46.1%), 중국 비중 26.7%→17.6%</td>
+<td><b>수출 주력 시장 교체가 월간·순간 데이터 양쪽에서 확인</b>된다. 채널·규제·제형 전략의 기준점이 바뀐다</td>
+<td><span class="v-no">T1 not verified</span><br>관세청 원자료 발표일 커버리지 밖 / <a href="https://www.beautynury.com/m/news/view/112193/cat/10">뷰티누리 09-16</a></td></tr>
+
+<tr><td>7</td><td><b>위조 화장품 45억원 — 식약처·지재처 첫 합동수사</b></td>
+<td>중국산 위조 화장품·건기식 <b>45억원(83만여 점, 61종)</b> 쿠팡·네이버 유통. 압수 재고 13억원. 기능성 제품에서 <b>유효성분 0</b> <span class="tag t-fact">FACT</span></td>
+<td>오픈마켓 정품성 문제가 <b>브랜드 리스크로 전이</b>된다. 특사경 합동수사는 단속 강도 상향 신호</td>
+<td><span class="v-mid">T1 via T2</span><br><a href="https://cosmorning.com/news/article.html?no=53550">코스모닝</a></td></tr>
+</tbody>
+</table>
+</div>
+<div class="excluded"><b>제외 사유 공개</b> — 로레알 파리증시 시총 1위(§7로 이동, 영향도 낮음) · 브렌트유 107달러(§7) · ODM 증설(공시일 9/9 = 커버리지 밖 → §8-7 배경 처리)</div>
+
+<h2>2. 국내 경제</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>항목</th><th>내용</th><th>Source (보도일)</th><th>검증</th></tr></thead>
+<tbody>
+<tr><td>정책 대응</td><td>구윤철 부총리, <b>확대거시경제금융회의</b>(9/17 08:00) — FOMC 인상·중동 정세 점검</td><td><a href="https://www.sisunnews.co.kr/news/articleView.html?idxno=246203">시선뉴스(정책브리핑)</a> 09-17</td><td><span class="v-mid">T1 via T2</span></td></tr>
+<tr><td>정책 대응</td><td><b>비상경제본부 회의 겸 경제관계장관회의</b>(9/18 08:00)</td><td>동일</td><td><span class="v-mid">T1 via T2</span></td></tr>
+<tr><td>환율</td><td class="num">원/달러 9/18 장중 1,387.10원 · 종가 1,383.3원</td><td><a href="https://supple.kr/news/cmu6n6l8w00e28kb5m7s1mwb7">서플</a> 09-18</td><td><span class="v-no">T1 not verified</span><br>e-나라지표는 2025-12까지만 공개</td></tr>
+</tbody>
+</table>
+</div>
+<div class="analysis"><span class="tag t-analysis">ANALYSIS</span> 이번 주 국내 경제는 <b>대응 국면</b>이었다. 이틀 연속 거시금융 회의가 열렸으나 <b>신규 대책 발표는 확인되지 않았다.</b> 회의 개최는 Noise Filter의 '행사' 유형이나, FOMC·중동이라는 정책 대응 맥락이 있어 예외 조항으로 포함했다.</div>
+
+<h2>3. 국내 사회</h2>
+<p><b>서울 시내버스 임단협 타결</b> → §1-4 참조. 인상률(3.2%)보다 <b>통상임금 기준 미합의</b>가 중요하다.</p>
+<p class="src">그 외: <span class="status s-none">Checked — no significant news</span> (2-of-5 Rule 충족 항목 없음)</p>
+
+<h2>4. 국내 산업</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>항목</th><th>내용</th><th>Source</th><th>검증</th></tr></thead>
+<tbody>
+<tr><td>반도체</td><td>9/18 삼성전자 +3%대(26만원 회복, 7거래일 만), SK하이닉스 +5%(180만원대, 6거래일 만). 엔비디아·마이크론 강세 연동</td><td><a href="https://www.businesskorea.co.kr/news/articleView.html?idxno=277336">비즈니스코리아</a> 09-18</td><td><span class="v-no">T1 not verified</span></td></tr>
+</tbody>
+</table>
+</div>
+<div class="excluded"><b>제외</b> — 중기부 K-수출 전략기업 188개사(09-17): 2-of-5 중 1개만 충족, 개별 기사 URL 미확보 → Watch Item 이월</div>
+
+<h2>5. 유통 / Retail / E-commerce</h2>
+<ul>
+<li><b>CJ올리브영, 모바일 AI 피부진단 공개</b>(9/15) <span class="tag t-fact">FACT</span> — 앱 문진 후 얼굴 촬영·업로드 → 피부타입·모공·색소·수분·유분·주름 분석 및 맞춤 루틴 추천. 오프라인 SkinScan 유지. 프로모션 9/30까지.
+<span class="tag t-claim">CLAIM</span> 연내 피부 변화 추적·퍼스널컬러 진단 추가 계획. <a href="https://www.jangup.com/news/articleView.html?idxno=99829">장업신문 09-16</a></li>
+<li><b>비노트(B.note), 무신사 뷰티 전체 1위</b>(9/18) <span class="tag t-claim">COMPANY CLAIM</span> — 출시 8일 만. <a href="https://www.beautynury.com/m/news/view/112215/cat/10">뷰티누리 09-18</a></li>
+</ul>
+<div class="analysis"><span class="tag t-analysis">ANALYSIS</span> 올리브영은 <b>진단 데이터로 고객을 앱에 묶고</b>, 신생 브랜드는 <b>무신사에서 먼저 1위를 찍었다.</b> 뷰티 커머스의 진입 경로가 갈라지는 중 — 다만 근거 2건으로 추세 판정은 이르다.</div>
+
+<h2>6. 증권 / 금융시장</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>지표</th><th>값</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>KOSPI (9/18)</td><td class="num"><b>6,894.23</b> · +178.82p <b>(+2.66%)</b></td><td><a href="https://view.asiae.co.kr/article/2026091815340598248">아시아경제</a> · <a href="https://www.businesskorea.co.kr/news/articleView.html?idxno=277336">비즈니스코리아</a></td></tr>
+<tr><td>KOSDAQ (9/18)</td><td class="num">827.12 · +4.94p (+0.60%)</td><td>비즈니스코리아</td></tr>
+<tr><td>원/달러 (9/18)</td><td class="num">종가 1,383.3원 · 장중 1,387.10원</td><td>서플</td></tr>
+<tr><td>미 10년물</td><td>5% 상회 → 4%대 하락</td><td>서플</td></tr>
+<tr><td>화장품 섹터</td><td>9월 중 <b>약 -20% 조정</b>(산출 기준 미상) · 주간 30개사 중 16개 상승/14개 하락 <span class="tag t-media">MEDIA</span></td><td><a href="https://www.cosinkorea.com/news/article.html?no=58349">코스인코리아 09-20</a></td></tr>
+</tbody>
+</table>
+</div>
+<h4>⚠️ 출처 간 수급 수치 불일치 (평균 내지 않음)</h4>
+<div class="tablewrap">
+<table>
+<thead><tr><th>출처</th><th>외국인</th><th>기관</th><th>개인</th></tr></thead>
+<tbody>
+<tr><td>서플 (09-18)</td><td class="num">+1,600억</td><td class="num">+1.5조</td><td class="num"><b>-3.3조</b></td></tr>
+<tr><td>아시아경제·비즈니스코리아 (09-18)</td><td class="num"><b>+4,206억</b></td><td class="num"><b>+3조 1,675억</b></td><td>미기재</td></tr>
+</tbody>
+</table>
+</div>
+<p class="src"><b>차이 원인 미확인.</b> 집계 시점(장중 vs 확정), 시장 범위(코스피 단독 vs 코스피+코스닥), 프로그램 매매 포함 여부 중 하나로 추정되나 확인하지 못했다. 한국거래소(KRX) 원자료 대조 필요 → Watch Item.</p>
+
+<h2>7. GLOBAL HEADLINES</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>지역</th><th>헤드라인</th><th>Source</th><th>검증</th></tr></thead>
+<tbody>
+<tr><td>미국</td><td>연준 25bp 인상 3.75~4.00%, 12-0 만장일치 → §1-1</td><td><a href="https://www.federalreserve.gov/newsevents/pressreleases/monetary20260916a.htm">Fed 성명 원문</a></td><td><span class="v-ok">T1 verified</span></td></tr>
+<tr><td>중국</td><td>8월 소매판매 +0.4% / 산업생산 +5.2% / 고정자산투자 -7.2% → §1-2</td><td><a href="https://www.cnbc.com/2026/09/15/china-august-retail-sales-industrial-output-investment-exports-.html">CNBC 09-15</a></td><td><span class="v-mid">T1 via T2</span></td></tr>
+<tr><td>중동·원자재</td><td>후티의 예멘 <b>모카항 장악</b>(9/17) → 브렌트유 <b>107달러</b> 돌파</td><td><a href="https://www.troweprice.com/personal-investing/resources/insights/global-markets-weekly-update.html">T. Rowe Price 주간</a></td><td><span class="v-no">T1 not verified</span></td></tr>
+<tr><td>유럽</td><td><b>로레알, 파리증시 시총 1위</b>(2,030억 유로 vs LVMH 2,010억). 비럭셔리 1위는 2017년 이후 처음</td><td><a href="https://www.cosinkorea.com/news/article.html?no=58336">코스인코리아 09-18</a></td><td><span class="v-no">T1 not verified</span></td></tr>
+<tr><td>일본</td><td><span class="status s-none">Not Checked</span> — 이번 회차 미조사</td><td>—</td><td>—</td></tr>
+</tbody>
+</table>
+</div>
+<div class="analysis"><span class="tag t-analysis">ANALYSIS</span> <b>금리 인상과 유가 급등이 같은 주에 겹쳤다.</b> 원가(유가)와 자본비용(금리)이 동시에 오르는 조합은 2026년 들어 처음이며, 하반기 원가 계획의 전제를 다시 봐야 한다.</div>
+
+<h2>8. BEAUTY INDUSTRY WEEKLY</h2>
+<div class="note">AXIS 2에도 Noise Filter·2-of-5 Rule을 적용했다. <b>앰배서더·화보·수상·채용·MOU·ESG·단순 리뉴얼 14건을 제외</b>했다.</div>
+
+<h3>8-1. Industry / Market</h3>
+<ul>
+<li><b>7월 화장품 수출 13.51억 달러(+37.8%), 1~7월 누적 83.29억(+28.5%)</b> — 모두 최대치.
+2분기 <b>온라인 해외직접판매 1.2조원(+38.7%)</b>, 이 중 <b>화장품 7,458억원(+45.9%)</b> — 면세 판매의 85% <span class="tag t-fact">FACT</span><br>
+<a href="https://www.beautynury.com/m/news/view/112193/cat/10">뷰티누리 09-16</a> · 데이터 기준: <b>7월 / 2분기</b>(보도일과 구분)</li>
+<li>아태 뷰티 시장 USD 1,413.2억(2025)→2,343.9억(2032), CAGR 7.5% <span class="tag t-media">MEDIA</span><br>
+⚠️ <b>원 리서치 출처 미표기 — 단독 근거로 사용하지 않음.</b> <a href="https://www.cosinkorea.com/news/article.html?no=58325">코스인코리아 09-16</a></li>
+</ul>
+
+<h3>8-2. Brand / Company</h3>
+<ul><li><b>동국제약 센텔리안24, 마데카 크림 누적 1억 개 돌파</b> <span class="tag t-claim">COMPANY CLAIM</span> — <a href="https://www.cosinkorea.com/news/article.html?no=58341">코스인코리아 09-18</a></li></ul>
+<div class="excluded"><b>제외 9건</b> — 라네즈-BTS 진 캠페인 / 려-공승연 앰배서더 / NARS-ATEEZ 화보 / 듀이트리 국방시설본부 MOU / 크레이버 일자리 으뜸기업 수상 / 와이어트 채용 / LG생활건강 그린댐 ESG / 에이블씨엔씨 밀라노 행사 / 코스메카 윤리경영 교육 — <b>전부 2-of-5 미달</b></div>
+
+<h3>8-3. Distribution</h3>
+<p>→ §5 참조 (올리브영 AI 피부진단, 비노트 무신사 1위)</p>
+
+<h3>8-4. Global / Export</h3>
+<p>→ §8-1 및 §1-6 참조. <b>[배경]</b> 9/1~10 수출 4.01억 달러(+46.1%), 유럽 +88.6%, 중국 비중 17.6% — <b>관세청 원자료 발표 9/11로 커버리지 밖</b>, 코스인코리아 9/17 기사가 ODM 증설과 연결해 재구성한 것.</p>
+
+<h3>8-5. Ingredient / Technology</h3>
+<ul>
+<li><b>NAD·NMN의 확산</b> — 주간 신제품 리뷰에서 비타민C 99%, <b>NAD+·NMN</b>, 시카, 세라마이드, 펩타이드, 식물성 카페인이 반복 성분으로 정리됨 <span class="tag t-media">MEDIA</span> <a href="https://www.beautynury.com/m/news/view/112184/cat/10">뷰티누리 09-18</a></li>
+<li>코스메토제노믹스 / 디지털 트윈 / 정밀발효 — <a href="https://www.cosinkorea.com/news/article.html?no=58325">코스인코리아 09-16</a></li>
+</ul>
+
+<h3>8-6. Regulation</h3>
+<div class="tablewrap">
+<table>
+<thead><tr><th>항목</th><th>내용</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td><b>GCORAS 의장국</b></td><td>13개국 16개 기관, 만장일치, 상설사무국 식약처 내 설치, 2026 서울 이니셔티브 채택. <b>미·중·일·프 불참</b></td><td><a href="https://www.cosinkorea.com/news/article.html?no=58320">코스인코리아 09-16</a> · <a href="https://www.kmjournal.net/news/articleView.html?idxno=13593">KMJ</a></td></tr>
+<tr><td><b>2028 안전성 평가 의무화 대비</b></td><td>식약처 식품의약품안전평가원, <b>2026 화장품 위해평가 국제심포지엄</b>(10/8 개최, 등록 9/16 시작). EU CLP·CMR 규제, 차세대 피부감작성 가이드라인, 식물·미생물 유래 원료 평가</td><td><a href="https://www.cosmorning.com/news/article.html?no=53542">코스모닝 09-17</a></td></tr>
+<tr><td><b>수출 규제 대응</b></td><td>대한화장품산업연구원, 제5회 K-뷰티 수출 규제 대응 콘퍼런스(10/14~15). 국내 4명·해외 9명 전문가. 카오·영국화장품협회·프랑스중소화장품협회·SCCS 공동의장 참여</td><td><a href="https://www.cosmorning.com/news/article.html?no=53560">코스모닝 09-20</a></td></tr>
+<tr><td><b>파키스탄·인도</b></td><td>파키스탄 일반화장품법 2026 상원 과기위 통과(최대 징역 7년·벌금 1,000만 루피) / 인도 CDSCO 파키스탄산 미백크림 2종 중금속 초과 경보</td><td><a href="https://www.cosinkorea.com/news/article.html?no=58336">코스인코리아 09-18</a></td></tr>
+<tr><td><b>위조품 단속</b></td><td>식약처·지재처 특사경 첫 합동수사 45억원 적발 → §1-7</td><td><a href="https://cosmorning.com/news/article.html?no=53550">코스모닝 09-17</a></td></tr>
+</tbody>
+</table>
+</div>
+<div class="analysis"><span class="tag t-analysis">ANALYSIS</span> 이번 주 규제 5건은 하나의 서사로 읽힌다 — <b>한국이 신흥시장 규제 표준을 주도(GCORAS)하면서, 동시에 2028년 자국 안전성 평가 의무화를 준비(심포지엄)하고, 수출 규제 대응을 조직화(콘퍼런스)하고 있다.</b> 규제 강화가 이미 높은 기준을 통과한 K뷰티에는 방어막으로 작동할 여지가 있다.</div>
+
+<h3>8-7. ODM / OEM</h3>
+<div class="excluded"><b>[배경]</b> 코스메카코리아 <b>1,360억원 신규 시설투자 — 공시일 2026-09-09</b>(자기자본 대비 40.45%, 투자기간 2030-12-31, 목적: 생산능력 확대). 6월 640억원으로 청주 공장 부지·건물 확보. <a href="https://edaily.co.kr/news/read?mediaCodeNo=257&newsid=04024566645578480">이데일리 09-09</a><br>→ <b>커버리지 기간 밖</b>이므로 본주 Issue로 계상하지 않는다. 한국콜마 1,733억(베이징→세종)·코스맥스 605억(5월)도 동일.</div>
+
+<h3>8-8. M&amp;A / Investment</h3>
+<p><span class="status s-none">Checked — no significant news</span> · 해외 인사이동 3건은 유료 구간으로 기업명 미확인 → <b>기재하지 않음</b></p>
+
+<h2>9. NEW PRODUCT WATCH</h2>
+<div class="note">Price: <b>Verified</b>(금액 기재) / <b>Not disclosed</b> / <b>Not verified</b>. 가격 미확인으로 제품을 제외하지 않는다.<br>
+빈칸(—)은 공개 정보 없음. 단순 리뉴얼·한정 패키지·색상 변경 제외.</div>
+
+<h3>9-1. KOREA (5건)</h3>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Brand</th><th>Product</th><th>Category</th><th>성분·기술</th><th>효능(Claim)</th><th>제형</th><th>Price</th><th>채널</th><th>출시/기사일</th><th>Article URL</th></tr></thead>
+<tbody>
+<tr><td><b>이옴(EIOM)</b></td><td>NAD 플럼핑 젤리 마스크</td><td>하이드로겔 마스크</td><td><b>보타이드</b>(보툴리눔 펩타이드+200Da 저분자 콜라겐), <b>NAD 99%</b>, 14종 멀티펩타이드, 마이크로바이옴 3종 발효복합체, 세라마이드·판테놀</td><td>모공·탄력·수분·피부결 <span class="tag t-claim">CLAIM</span></td><td>변색 하이드로겔 시트(연보라→진보라), 다이아몬드 엠보</td><td><b>Not disclosed</b></td><td>국내</td><td>09-16</td><td><a href="https://www.jangup.com/news/articleView.html?idxno=99834">장업신문</a></td></tr>
+<tr><td><b>동국제약 센텔리안24</b></td><td>마데카 스타톡 세럼 올타이트</td><td>더마 세럼</td><td><b>TECA-Toc 500,000ppm</b>(TECA+폴리락틱애시드+보툴리눔 라이크 펩타이드), 병풀추출물</td><td><b>탄력 178.96% 개선</b>(기존 대비), 2주 후 이마 볼륨 35.85%·좌볼 25.8%·우볼 29.46% <span class="tag t-claim">CLAIM</span></td><td>세럼</td><td><b>Not disclosed</b></td><td>—</td><td>09-18</td><td><a href="https://www.jangup.com/news/articleView.html?idxno=99881">장업신문</a></td></tr>
+<tr><td><b>스킨1004</b></td><td>마다가스카르 센텔라 비타민C 96 파우더</td><td>브라이트닝 파우더</td><td><b>비타민C 96%</b>(순도 99%), 페룰산, 코엔자임Q10, 카르노신, 센텔라 3종, 판테놀, 알란토인</td><td>데일리 브라이트닝 <span class="tag t-claim">CLAIM</span></td><td>무수 개별포장 분말(혼합 사용)</td><td><b>Not disclosed</b></td><td>—</td><td>출시 09-18 / 기사 09-17</td><td><a href="https://www.jangup.com/news/articleView.html?idxno=99867">장업신문</a></td></tr>
+<tr><td><b>이니스프리</b></td><td>그린티 세라마이드 밀크 듀오 세트</td><td>스킨케어 세트</td><td>그린티, 세라마이드</td><td>보습 <span class="tag t-claim">CLAIM</span></td><td>밀크</td><td><b>Not verified</b></td><td>—</td><td>09-18</td><td><a href="https://www.beautynury.com/m/news/view/112184/cat/10">뷰티누리</a></td></tr>
+<tr><td><b>AGE20'S</b></td><td>스킨 퍼스트 히든 프렙 파운데이션 팩트</td><td>베이스</td><td>—</td><td><b>"36% 얇은 커버"</b>, 민감성 피부 시험 완료 <span class="tag t-claim">CLAIM</span></td><td>팩트</td><td><b>Not verified</b></td><td>—</td><td>09-16</td><td><a href="https://www.jangup.com/news/articleView.html?idxno=99833">장업신문</a></td></tr>
+</tbody>
+</table>
+</div>
+<div class="excluded"><b>제외 5건</b> — AHC 추석 한정 세트(한정 패키지) / 토니모리 워터풀 버터 틴트 가을 3색(색상 변경) / 정샘물 맨즈 쿠션(정보 부족·URL 미확보) / 딥티크·향수 2종(단순 국내 소개)</div>
+
+<h3>9-2. USA (4건)</h3>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Brand</th><th>Product</th><th>Category</th><th>성분·기술</th><th>효능(Claim)</th><th>제형</th><th>Price</th><th>채널</th><th>출시/기사일</th><th>Article URL</th></tr></thead>
+<tbody>
+<tr><td><b>Dolce&amp;Gabbana Beauty</b></td><td>Ever-Youth Gold Peptides (마스크/세럼/아이세럼/크림)</td><td>프레스티지 스킨케어</td><td><b>골드 펩타이드</b>, 나이아신아마이드, 아르지렐린, 프림로즈 줄기세포, <b>비건 PDRN</b>, HA</td><td>브라이트닝·퍼밍·리볼류마이징, <b>피부세포 NAD+ 부스팅</b> <span class="tag t-claim">CLAIM</span></td><td>마스크(아이보리→골드 변색)/세럼/크림</td><td class="num"><b>Verified $110~$170</b></td><td>D&amp;G 부티크·리테일러</td><td><b>09-15</b></td><td><a href="https://fashionweekdaily.com/september-skincare-launches-you-dont-want-to-miss/">Daily Front Row</a></td></tr>
+<tr><td><b>Neutrogena</b></td><td>BEMT 적용 선케어</td><td>선케어</td><td><b>베모트리졸(BEMT)</b> — FDA가 20여 년 만에 승인한 신규 UV 필터</td><td>자극 감소·백탁 없음 <span class="tag t-media">MEDIA</span></td><td>—</td><td><b>Not verified</b></td><td>매스</td><td>09-17</td><td><a href="https://beautymatter.com/articles/week-38-beauty-brand-and-product-launches">BeautyMatter W38</a> ⚠️유료</td></tr>
+<tr><td><b>beecee</b> (Gregg Renfrew)</td><td>The Everything Balm</td><td>멀티밤 / 신규 브랜드</td><td>시어버터, 호호바오일(페트롤라툼 무첨가)</td><td>수분 잠금·건조 부위 진정 <span class="tag t-claim">CLAIM</span></td><td>연고형 밤</td><td class="num"><b>Verified $24</b></td><td>beecee.com</td><td>09-17</td><td><a href="https://www.newbeauty.com/view/launch-list-september-2026">NewBeauty</a></td></tr>
+<tr><td><b>Reale Actives</b> (Alix Earle)</td><td>안티 레드니스 세럼</td><td>진정 세럼</td><td>—</td><td>홍조 완화 <span class="tag t-claim">CLAIM</span></td><td>세럼</td><td><b>Not verified</b></td><td>—</td><td>09-17</td><td><a href="https://beautymatter.com/articles/week-38-beauty-brand-and-product-launches">BeautyMatter W38</a> ⚠️유료</td></tr>
+</tbody>
+</table>
+</div>
+<div class="excluded"><b>제외 2건</b> — Shark Beauty CryoGlow(<b>Article URL 미확보 → 게재 금지 규칙 적용</b>) / Typology·Kosas 마스카라 색상 확장(색상 변경)</div>
+
+<h3>9-3. JAPAN (4건)</h3>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Brand</th><th>Product</th><th>Category</th><th>성분·기술</th><th>효능(Claim)</th><th>제형</th><th>Price</th><th>채널</th><th>출시일</th><th>Article URL</th></tr></thead>
+<tbody>
+<tr><td><b>토리든(Torriden)</b></td><td>Dive 라인 6종</td><td>스킨케어</td><td>히알루론산, 세라마이드</td><td>수분 공급 <span class="tag t-claim">CLAIM</span></td><td>세럼·토너·크림·시트</td><td class="num"><b>Verified ¥1,980~¥2,640</b><br><span class="src">마스크 ¥275~825</span></td><td>@cosme 등</td><td><b>09-14</b></td><td><a href="https://www.cosme.net/feature/2026autumn-sep-2/">@cosme</a></td></tr>
+<tr><td><b>msh</b></td><td>아이래시 롱래싱 마스카라</td><td>아이 메이크업</td><td>듀얼 마이크로파이버</td><td>슬림·롱 래시 <span class="tag t-claim">CLAIM</span></td><td>마스카라(2색)</td><td class="num"><b>Verified ¥1,760</b></td><td>@cosme 등</td><td><b>09-14</b></td><td><a href="https://www.cosme.net/feature/2026autumn-sep-2/">@cosme</a></td></tr>
+<tr><td><b>알비온(Albion)</b></td><td>엑시아 4종</td><td>데파코스</td><td>퍼펙트 모이스처 SPF25/PA++</td><td>—</td><td>아이컬러·립·크림</td><td class="num"><b>Verified ¥5,500~¥7,700</b></td><td>백화점</td><td><b>09-18</b></td><td><a href="https://www.cosme.net/feature/2026autumn-sep-1/">@cosme</a></td></tr>
+<tr><td><b>톰 포드 뷰티</b></td><td>립 컬러 신색 5종</td><td>데파코스 립</td><td>—</td><td>—</td><td>립스틱 3.5g</td><td class="num"><b>Verified ¥8,470</b></td><td>백화점</td><td><b>09-18</b></td><td><a href="https://www.cosme.net/feature/2026autumn-sep-1/">@cosme</a></td></tr>
+</tbody>
+</table>
+</div>
+<div class="excluded"><b>제외 5건</b> — 질 스튜어트 부활 컬렉션 / 엘레강스 가을 베이스 / 꼼데가르송 Tears / 리파 하트 콤 아이론 / 코스메 데코르테 크리스마스 예약 — <b>시즌 리뉴얼·한정 상품</b>이며 성분·기술 정보 부재</div>
+<p class="src"><b>Price 커버리지</b>: KR <b>0/5 Verified</b> · US <b>2/4</b> · JP <b>4/4</b></p>
+
+<h2>10. COUNTRY TREND SIGNAL</h2>
+<div class="note">생성 조건 — <b>A</b>: 독립 브랜드 3건+ / <b>B</b>: 제품 2건+ &amp; Tier 1/2 근거. 미달은 §11 Watch Item으로 보냄.</div>
+
+<h3>KOREA</h3>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Signal</th><th>Observation (사실)</th><th>Evidence Count</th><th>Interpretation (해석)</th><th>Confidence</th></tr></thead>
+<tbody>
+<tr><td><b>정량 효능 클레임</b></td><td>178.96%(탄력), 96%(비타민C 함량), 500,000ppm, 99%(NAD 순도), 36%(커버 두께) 표기</td><td><b>브랜드 4개 / 제품 4건</b><br>(이옴·동국제약·스킨1004·AGE20'S)<br>조건 A 충족</td><td>성분 경쟁이 "무엇을 넣었나"에서 "얼마나 넣었고 몇 % 좋아졌나"로 이동. 검증 주체가 자체 시험이라 <b>표시광고 리스크와 동전의 양면</b></td><td><b>Medium</b><br><span class="src">근거 전부 Tier 3, 전년 동기 비교 없음</span></td></tr>
+<tr><td>보툴리눔 유사 펩타이드</td><td>보타이드, TECA-Toc</td><td>브랜드 2개 + Tier 3 기사 1건<br>조건 B <b>미충족</b></td><td>—</td><td><b>Signal 아님</b><br>→ §11 Watch Item</td></tr>
+<tr><td>NAD·NMN</td><td>이옴 NAD 99% + 주간 리뷰가 NAD+·NMN 지목</td><td>제품 1건 + 매체 기사 1건(Tier 3)<br>조건 A·B 모두 <b>미충족</b></td><td>—</td><td><b>Signal 아님</b><br>→ §11 Watch Item</td></tr>
+</tbody>
+</table>
+</div>
+<p class="src"><b>직전 주 대비</b>: 정량 클레임 <b>Continued</b> (v1 Strong → v2 Medium, 근거 등급 하향 반영) · <b>계절성 검토</b>: 해당 없음</p>
+
+<h3>USA</h3>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Signal</th><th>Observation</th><th>Evidence Count</th><th>Interpretation</th><th>Confidence</th></tr></thead>
+<tbody>
+<tr><td><b>BEMT 신규 UV 필터 확산</b></td><td>Ultra Violette(프레스티지)에 이어 Neutrogena가 <b>매스 브랜드 최초</b> 채택</td><td><b>브랜드 2개 + FDA 승인 사실</b>(Tier 1 규제 근거)<br>조건 B 충족</td><td>FDA가 20여 년 만에 승인한 필터가 <b>프레스티지→매스로 2주 내 하강.</b> 미국 선케어 포뮬러 경쟁의 리셋 가능성</td><td><b>Medium</b><br><span class="src">제품 근거는 Tier 3(유료 프리뷰)</span></td></tr>
+<tr><td>셀럽·창업자 D2C 브랜드</td><td>beecee, Reale Actives</td><td>브랜드 2개, Tier 1/2 시장 근거 없음<br>조건 B 미충족</td><td>—</td><td><b>Signal 아님</b><br>→ §11 Watch Item</td></tr>
+</tbody>
+</table>
+</div>
+<p class="src"><b>직전 주 대비</b>: BEMT <b>Continued</b> (v1 Moderate → v2 Medium, 표기 체계 변경) · <b>계절성 검토</b>: 해당 없음</p>
+
+<h3>JAPAN</h3>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Signal</th><th>Observation</th><th>Evidence Count</th><th>Interpretation</th><th>Confidence</th></tr></thead>
+<tbody>
+<tr><td><b>가격대 이원화</b></td><td>K뷰티·매스 ¥1,760~¥2,640(토리든·msh) vs 데파코스 ¥5,500~¥8,470(알비온·톰포드). 중간대 신제품 미관찰</td><td><b>브랜드 4개 / 가격 4건 전부 Verified</b><br>조건 A 충족</td><td>일본 신제품 가격이 양극으로 갈린다. <b>K뷰티는 하단 가격대에서 라인 단위로 진입</b>(토리든 6종 동시)</td><td><b>Medium</b><br><span class="src">@cosme(Tier 1 리테일) 근거이나 1주 관찰</span></td></tr>
+<tr><td>9/18 데파코스 일괄 출시</td><td>알비온·톰포드 등 9/18 집중</td><td>브랜드 2개(제외 3건 포함 시 5개)</td><td>—</td><td><b>Low → Signal 미부여</b><br><span class="src">연례 계절 패턴 가능성, 전년 동기 비교 없음. <b>v1의 Strong 판정 철회</b></span></td></tr>
+</tbody>
+</table>
+</div>
+<p class="src"><b>직전 주 대비</b>: 가격 이원화 <b>Continued</b> · <b>계절성 검토</b>: ⚠️ 9월 중순 데파코스 집중은 계절성으로 판단 — v1 Strong을 Low로 하향하고 Signal에서 제외</p>
+
+<h3>CROSS-COUNTRY</h3>
+<ul>
+<li><b>3개국 공통 신호 없음.</b></li>
+<li>한·미 <b>NAD</b> 동시 등장은 각 1건으로 조건 미달 → Watch Item 유지</li>
+<li><b>PDRN이 미국 프레스티지(D&amp;G '비건 PDRN')에 등장</b> — 1건이므로 Signal 아님. K성분의 글로벌 프레스티지 채택 경로로 <b>추적 대상</b></li>
+</ul>
+
+<h2>11. BEAUTY SIGNALS TO WATCH</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>#</th><th>Watch Item</th><th>현재 근거</th><th>승격 조건</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><b>NAD·NMN 확산</b> (KR·US)</td><td>각 1건 + 매체 트렌드 언급</td><td>독립 브랜드 3건 또는 2건+Tier 1/2 근거</td></tr>
+<tr><td>2</td><td><b>보툴리눔 유사 펩타이드</b> (KR)</td><td>브랜드 2개</td><td>Tier 1/2 시장 근거 또는 브랜드 3개</td></tr>
+<tr><td>3</td><td><b>비건 PDRN의 글로벌 프레스티지 채택</b></td><td>D&amp;G 1건</td><td>추가 글로벌 브랜드 1건 이상</td></tr>
+<tr><td>4</td><td><b>셀럽·창업자 D2C 브랜드</b> (US)</td><td>2건</td><td>시장 규모·점유율 근거</td></tr>
+<tr><td>5</td><td><b>KRX 원자료로 9/18 수급 불일치 확인</b></td><td>출처 2개 값 상이</td><td>KRX 확정치 대조</td></tr>
+<tr><td>6</td><td><b>9월 화장품 수출 확정치</b>(관세청 월간)</td><td>7월 +37.8% 확인</td><td>10월 초 발표</td></tr>
+<tr><td>7</td><td><b>GCORAS 사무국 구성·워킹그룹 과제</b></td><td>의장국 선출까지</td><td>실무 과제 공개</td></tr>
+<tr><td>8</td><td><b>일본 데파코스 9월 집중 출시의 계절성</b></td><td>1주 관찰</td><td>전년 9월 데이터 대조</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>12. COVERAGE LOG</h2>
+<h4>화장품 전문매체 5곳 (독립 확인)</h4>
+<div class="tablewrap">
+<table>
+<thead><tr><th>매체</th><th>상태</th><th>사용 기사</th><th>Fallback 시도 / 비고</th></tr></thead>
+<tbody>
+<tr><td><b>장업신문</b></td><td><span class="status s-ok">Checked — usable articles found</span></td><td><b>4</b></td><td>목록 페이지 직접 접근 성공</td></tr>
+<tr><td><b>코스인코리아</b></td><td><span class="status s-ok">Checked — usable articles found</span></td><td><b>5</b></td><td>목록 페이지 직접 접근 성공</td></tr>
+<tr><td><b>뷰티누리</b></td><td><span class="status s-ok">Checked — usable articles found</span></td><td><b>4</b></td><td><b>Fallback ③ 성공</b> — 홈·목록 실패 후 <code>/m/search/news/q/&lt;키워드&gt;/page</code> 검색 URL로 9/14~20 기사 확보</td></tr>
+<tr><td><b>코스모닝</b></td><td><span class="status s-ok">Checked — usable articles found</span></td><td><b>3</b></td><td><b>Fallback ①② 성공</b> — 섹션 리스트 실패 후 도메인 한정 검색 + 개별 기사 URL</td></tr>
+<tr><td><b>CMN</b></td><td><span class="status s-part">Partial Access</span></td><td><b>0</b></td><td><b>Fallback ①②③ 모두 시도.</b> <code>news.asp</code> 확인 범위 <b>9/20~23</b>(커버리지 밖), 검색으로 찾은 기사는 <b>2026-03-17자</b>로 기간 밖. 커버리지 기간 내 기사 확인 실패</td></tr>
+</tbody>
+</table>
+</div>
+<div class="note"><b>SOURCE CONCENTRATION</b>: 최다 매체 코스인코리아 <b>31.3%</b>(5/16) · 상위 2개 합계 <b>56.3%</b>(9/16)<br>
+→ <b>경고 없음</b> (1개 매체 50% 이하, 2개 합계 80% 이하) · <b>4개 매체 실제 반영</b>(목표 3개 이상 충족)</div>
+<p class="src"><b>Price 커버리지</b>: KR 0/5 · US 2/4 · JP 4/4 (Verified 기준) — 국내 업계지가 신제품 가격을 싣지 않는 구조적 특성. <b>Trend Signal이 아니라 커버리지 지표로 기록한다.</b></p>
+
+<h2>13. QA METRICS</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>#</th><th>지표</th><th>값</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>전체 수집 기사 수</td><td>약 <b>158건</b> (헤드라인 기준)</td></tr>
+<tr><td>2</td><td>중복 제거 후 Issue 수</td><td><b>41</b></td></tr>
+<tr><td>3</td><td>최종 사용 Issue 수</td><td><b>27</b></td></tr>
+<tr><td>4</td><td><b>제외된 Noise 기사 수</b></td><td><b>14</b> (신제품 카테고리 제외 12건 별도)</td></tr>
+<tr><td>5</td><td><b>Tier 1 직접 확인 수</b></td><td><b>2</b> (Fed FOMC 성명 원문, 관세청 보도자료 목록)</td></tr>
+<tr><td>6</td><td><b>Tier 1 verification rate</b></td><td><b>2/12 = 16.7%</b> (핵심 정량 주장 12건 기준)</td></tr>
+<tr><td>7</td><td>Tier 2 사용 수</td><td><b>5</b></td></tr>
+<tr><td>8</td><td>Tier 3 사용 수</td><td><b>14</b></td></tr>
+<tr><td>9</td><td>Beauty 5개 매체 상태</td><td>Checked 4 / Partial Access 1</td></tr>
+<tr><td>10</td><td>Beauty Source concentration</td><td>1위 31.3% / 상위 2개 56.3% → <b>경고 없음</b></td></tr>
+<tr><td>11</td><td><b>개별 Article URL 확보율</b></td><td><b>27/27 = 100%</b></td></tr>
+<tr><td>12</td><td>신제품 수 KR / US / JP</td><td><b>5 / 4 / 4</b></td></tr>
+<tr><td>13</td><td>Trend Signal별 Evidence Count</td><td>KR 정량클레임 4 / US BEMT 2+Tier1 / JP 가격이원화 4 — <b>채택 3건</b>, 미달 5건은 Watch Item</td></tr>
+<tr><td>14</td><td>Access Blocked Source</td><td><b>0건</b> (CMN은 Partial Access) / BeautyMatter 유료 구간 부분 제약</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>14. SOURCES</h2>
+<h4>Tier 1 (원문 직접 확인)</h4>
+<ul class="src">
+<li><a href="https://www.federalreserve.gov/newsevents/pressreleases/monetary20260916a.htm">FOMC 성명 원문 (2026-09-16)</a> — Federal Reserve</li>
+<li><a href="https://www.customs.go.kr/kcs/na/ntt/selectNttList.do?bbsId=1362&mi=2891">관세청 보도자료 목록</a> — 9/1~20 수출입 현황 발표일(9/21) 확인</li>
+<li><a href="https://www.cosme.net/feature/2026autumn-sep-2/">@cosme 프티프라</a> · <a href="https://www.cosme.net/feature/2026autumn-sep-1/">데파코스</a> (리테일 공식)</li>
+</ul>
+<h4>Tier 2</h4>
+<ul class="src">
+<li><a href="https://www.cnbc.com/2026/09/15/china-august-retail-sales-industrial-output-investment-exports-.html">CNBC — China August data (09-15)</a></li>
+<li><a href="https://www.troweprice.com/personal-investing/resources/insights/global-markets-weekly-update.html">T. Rowe Price — Global Markets Weekly (09-18)</a></li>
+<li><a href="https://www.mt.co.kr/policy/2026/09/16/2026091600473290255">머니투데이 — 서울 시내버스 타결 (09-16)</a></li>
+<li><a href="https://view.asiae.co.kr/article/2026091815340598248">아시아경제 — 코스피 6894.23 마감 (09-18)</a></li>
+<li><a href="https://edaily.co.kr/news/read?mediaCodeNo=257&newsid=04024566645578480">이데일리 — 코스메카코리아 1360억 공시 (09-09, 배경)</a></li>
+</ul>
+<h4>Tier 3 — 뷰티 전문매체</h4>
+<ul class="src">
+<li>장업신문: <a href="https://www.jangup.com/news/articleView.html?idxno=99834">이옴 NAD 마스크</a> · <a href="https://www.jangup.com/news/articleView.html?idxno=99867">스킨1004 비타민C 96</a> · <a href="https://www.jangup.com/news/articleView.html?idxno=99881">센텔리안24 스타톡</a> · <a href="https://www.jangup.com/news/articleView.html?idxno=99829">올리브영 AI 피부진단</a></li>
+<li>코스인코리아: <a href="https://www.cosinkorea.com/news/article.html?no=58320">GCORAS 의장국</a> · <a href="https://www.cosinkorea.com/news/article.html?no=58336">Global Beauty Wire</a> · <a href="https://www.cosinkorea.com/news/article.html?no=58325">한중일 혁신기술</a> · <a href="https://www.cosinkorea.com/news/article.html?no=58349">화장품 주가</a> · <a href="https://www.cosinkorea.com/news/article.html?no=58341">마데카 1억개</a></li>
+<li>뷰티누리: <a href="https://www.beautynury.com/m/news/view/112193/cat/10">KEY NOTES 2026-08 (09-16)</a> · <a href="https://www.beautynury.com/m/news/view/112184/cat/10">주간 신제품 트렌드 (09-18)</a> · <a href="https://www.beautynury.com/m/news/view/112215/cat/10">비노트 무신사 1위 (09-18)</a> · <a href="https://www.beautynury.com/m/news/view/112174/cat/10">K뷰티 마케팅 인터뷰 (09-15)</a></li>
+<li>코스모닝: <a href="https://cosmorning.com/news/article.html?no=53550">위조 화장품 적발 (09-17)</a> · <a href="https://www.cosmorning.com/news/article.html?no=53542">위해평가 국제심포지엄 (09-17)</a> · <a href="https://www.cosmorning.com/news/article.html?no=53560">수출 규제 대응 콘퍼런스 (09-20)</a></li>
+</ul>
+<h4>Tier 3 — 기타</h4>
+<ul class="src">
+<li><a href="https://www.kmjournal.net/news/articleView.html?idxno=13593">KMJ — GCORAS, 미·중·일·프 불참</a></li>
+<li><a href="https://www.businesskorea.co.kr/news/articleView.html?idxno=277336">비즈니스코리아 — 코스피 마감 시황 (09-18)</a></li>
+<li><a href="https://supple.kr/news/cmu6n6l8w00e28kb5m7s1mwb7">서플 — 코스피·환율 (09-18)</a></li>
+<li><a href="https://www.sisunnews.co.kr/news/articleView.html?idxno=246203">시선뉴스 — 정책브리핑 (09-17)</a></li>
+<li><a href="https://www.newbeauty.com/view/launch-list-september-2026">NewBeauty</a> · <a href="https://fashionweekdaily.com/september-skincare-launches-you-dont-want-to-miss/">Daily Front Row</a> · <a href="https://beautymatter.com/articles/week-38-beauty-brand-and-product-launches">BeautyMatter W38 ⚠️유료</a></li>
+</ul>
+<h4>제외 기록</h4>
+<ul class="src">
+<li>코스메카코리아 W/W 에멀전 기술 논문 — <a href="https://www.cmn.co.kr/sub/news/news_view.asp?news_idx=49391">CMN</a> <b>게재일 2026-03-17, 커버리지 밖</b></li>
+<li>소비자원 지재권 허위표시 634건 — 발표 2026-09-07, 커버리지 밖</li>
+<li>koriinsight 블로그 — Tier 4 단독 근거, 사용 안 함</li>
+</ul>
+
+<footer>
+v1(<code>2026-W38_weekly_brief.html</code>)은 보존되며 이 문서가 대체하지 않는다.<br>
+개정 규칙: <code>CLAUDE.md</code> §4-1~4-3, §5, §6, §7-1~7-2, §8-1~8-2 · <code>00_SYSTEM/source_policy.md</code> §3-1~3-2, §6<br>
+Weekly Intelligence Briefing · 2026-W38 v2 · Issued 2026-09-23
+</footer>
+
+</div>
+</body>
+</html>
