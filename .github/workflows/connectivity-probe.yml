@@ -1,0 +1,282 @@
+# GA-1 — Connectivity Probe
+#
+# 목적: GitHub Actions 실행 환경에서 Weekly Intelligence Brief에 필요한
+#       핵심 Source에 실제로 접근 가능한지 확인한다.
+#
+# 이 workflow가 하지 않는 것 (설계상 불가능하게 구성):
+#   - AI API 호출 없음        (anthropic 패키지·API 호출 없음)
+#   - Gmail 발송/Draft 없음    (google 패키지·SMTP 없음)
+#   - Secret 사용 없음         (secrets 컨텍스트를 어디에서도 참조하지 않음)
+#   - Weekly Brief 생성 없음   (수집·작성 단계 없음)
+#   - schedule 없음            (workflow_dispatch 전용)
+#   - 저장소 쓰기 없음         (permissions: contents: read, checkout도 하지 않음)
+#   - 비용 발생 없음           (Actions 무료 한도 내, 외부 유료 API 0건)
+#
+# 우회하지 않는 것:
+#   - robots.txt를 먼저 읽고, 전역 Disallow가 있으면 본문 요청을 보내지 않는다(SKIPPED)
+#   - CAPTCHA/봇 차단 화면을 만나면 BLOCKED로 기록만 한다. 우회를 시도하지 않는다
+#   - 로그인/인증이 필요한 경로에 접근하지 않는다
+#   - User-Agent를 브라우저로 위장하지 않는다. 식별 가능한 UA를 그대로 쓴다
+
+name: GA-1 Connectivity Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ga1-connectivity-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Probe Weekly Brief sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      LC_ALL: C
+      UA: "WIB-ConnectivityProbe/1.0 (+https://github.com/shpark250203/weekly-intelligence-briefing; GitHub Actions; contact via repo issues)"
+      CONNECT_TIMEOUT: "10"
+      MAX_TIME: "25"
+      MIN_BODY_BYTES: "1000"
+      POLITE_DELAY: "2"
+
+    steps:
+      - name: Runner environment fingerprint
+        run: |
+          set -uo pipefail
+          {
+            echo "## GA-1 Connectivity Probe"
+            echo ""
+            echo "- Run started (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "- Runner: ${RUNNER_OS} / ${RUNNER_ARCH}"
+            echo "- curl: $(curl --version | head -n1)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Runner egress IP (한국 사이트의 해외/데이터센터 IP 차단 여부 판단 근거):"
+          curl -sS --max-time 15 https://api.ipify.org || echo "(egress IP 조회 실패)"
+          echo ""
+
+      - name: Probe sources
+        run: |
+          set -uo pipefail
+
+          WORKDIR="$(mktemp -d)"
+          RESULTS="${WORKDIR}/results.tsv"
+          : > "$RESULTS"
+
+          # 프로브 대상 — "category|name|url"
+          # URL은 실제 수집에 쓸 대표 경로로 잡는다.
+          # 홈페이지만 열리고 목록 페이지가 막히는 경우를 잡아내기 위함이다.
+          SOURCES=(
+            "TIER1|한국은행|https://www.bok.or.kr/portal/main/main.do"
+            "TIER1|통계청|https://kostat.go.kr/board.es?mid=a10301010000&bid=207"
+            "TIER1|기획재정부(moef)|https://www.moef.go.kr/"
+            "TIER1|기획재정부 대체도메인(mofe)|https://www.mofe.go.kr/"
+            "TIER1|산업통상자원부|https://www.motie.go.kr/"
+            "TIER1|관세청|https://www.customs.go.kr/"
+            "TIER1|식품의약품안전처|https://www.mfds.go.kr/"
+            "TIER1|DART 전자공시|https://dart.fss.or.kr/"
+            "TIER1|한국거래소 KRX|http://data.krx.co.kr/"
+            "TIER1|Federal Reserve|https://www.federalreserve.gov/newsevents/pressreleases/2026-press.htm"
+            "BEAUTY|장업신문|https://www.jangup.com/news/articleList.html?view_type=sm"
+            "BEAUTY|CMN|https://www.cmn.co.kr/sub/news/news.asp"
+            "BEAUTY|뷰티누리|https://www.beautynury.com/news/list/cat/10"
+            "BEAUTY|코스모닝|https://cosmorning.com/news/section_list_all.html?sec_no=1"
+            "BEAUTY|코스인코리아|https://www.cosinkorea.com/news/articleList.html?view_type=sm"
+            "PRODUCT_KR|올리브영|https://www.oliveyoung.co.kr/store/main/main.do"
+            "PRODUCT_US|Sephora New|https://www.sephora.com/new-beauty-products"
+            "PRODUCT_US|Ulta|https://www.ulta.com/"
+            "PRODUCT_JP|@cosme|https://www.cosme.net/"
+            "PRODUCT_JP|fashion-press beauty|https://www.fashion-press.net/news/calendar/beauty/"
+            "CONTROL|example.com (대조군)|https://example.com/"
+          )
+
+          emit() {
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" \
+              >> "$RESULTS"
+          }
+
+          probe_one() {
+            category="$1"; name="$2"; url="$3"
+            scheme="${url%%://*}"
+            domain="$(printf '%s' "$url" | awk -F/ '{print $3}')"
+
+            dns="FAIL"; tls="N/A"; robots_status="-"; robots_block="no"
+            http_code="-"; redirects="-"; latency="-"; bytes="0"; final_url="-"
+            body_received="no"; result="ERROR"; note=""
+
+            # 1) DNS
+            if getent hosts "$domain" > "${WORKDIR}/dns.txt" 2>/dev/null; then
+              dns="OK"
+            else
+              emit "$category" "$name" "$domain" "FAIL" "$tls" "-" "-" "no" "0" "-" "-" \
+                   "ERROR" "DNS 해석 실패"
+              return
+            fi
+
+            # 2) TLS
+            if [ "$scheme" = "https" ]; then
+              if timeout 20 openssl s_client -connect "${domain}:443" -servername "$domain" \
+                   -brief </dev/null >"${WORKDIR}/tls.txt" 2>&1; then
+                tls="OK"
+              else
+                tls="FAIL"
+              fi
+            else
+              tls="PLAINTEXT"
+            fi
+
+            # 3) robots.txt — 읽고 존중한다 (우회하지 않는다)
+            robots_status="$(curl -sS -A "$UA" -L \
+              --connect-timeout "$CONNECT_TIMEOUT" --max-time 20 \
+              -o "${WORKDIR}/robots.txt" -w '%{http_code}' \
+              "${scheme}://${domain}/robots.txt" 2>/dev/null || echo "ERR")"
+
+            if [ "$robots_status" = "200" ] && [ -s "${WORKDIR}/robots.txt" ]; then
+              # mawk/gawk 양쪽에서 동작하도록 IGNORECASE를 쓰지 않고
+              # 사전에 소문자로 정규화한 뒤 판정한다. CR(\r)도 제거한다.
+              tr -d '\r' < "${WORKDIR}/robots.txt" \
+                | tr '[:upper:]' '[:lower:]' > "${WORKDIR}/robots.norm"
+              if awk '
+                BEGIN { star = 0; found = 0 }
+                /^[[:space:]]*user-agent[[:space:]]*:[[:space:]]*\*[[:space:]]*$/ { star = 1; next }
+                /^[[:space:]]*user-agent[[:space:]]*:/ { star = 0; next }
+                star && /^[[:space:]]*disallow[[:space:]]*:[[:space:]]*\/[[:space:]]*$/ { found = 1 }
+                END { exit(found ? 0 : 1) }
+              ' "${WORKDIR}/robots.norm"; then
+                robots_block="yes"
+              fi
+            fi
+
+            if [ "$robots_block" = "yes" ]; then
+              emit "$category" "$name" "$domain" "$dns" "$tls" "-" "-" "no" "0" "-" \
+                   "$robots_status" "SKIPPED" "robots.txt 전역 Disallow — 본문 요청 보내지 않음"
+              return
+            fi
+
+            # 4) 본 요청
+            wout="$(curl -sS -A "$UA" -L \
+              --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+              -o "${WORKDIR}/body.bin" \
+              -w '%{http_code}\t%{num_redirects}\t%{time_total}\t%{size_download}\t%{url_effective}' \
+              "$url" 2>"${WORKDIR}/curl_err.txt")" || true
+
+            if [ -z "$wout" ]; then
+              note="$(head -c 180 "${WORKDIR}/curl_err.txt" | tr '\n\t|' '   ')"
+              [ -z "$note" ] && note="curl 실패 (네트워크/타임아웃)"
+              emit "$category" "$name" "$domain" "$dns" "$tls" "000" "-" "no" "0" "-" \
+                   "$robots_status" "ERROR" "$note"
+              return
+            fi
+
+            http_code="$(printf '%s' "$wout" | cut -f1)"
+            redirects="$(printf '%s' "$wout" | cut -f2)"
+            latency="$(printf '%s' "$wout" | cut -f3)"
+            bytes="$(printf '%s' "$wout" | cut -f4)"
+            final_url="$(printf '%s' "$wout" | cut -f5)"
+
+            # 5) 본문 수신 확인 — HTTP 200만으로 PASS 처리하지 않는다
+            html_marker="no"; challenge="no"
+            if [ -s "${WORKDIR}/body.bin" ]; then
+              if head -c 4000 "${WORKDIR}/body.bin" \
+                   | grep -qiE '<html|<!doctype|<body|<rss|<feed|<\?xml'; then
+                html_marker="yes"
+              fi
+              if head -c 8000 "${WORKDIR}/body.bin" \
+                   | grep -qiE 'captcha|cf-browser-verification|just a moment|attention required|access denied|비정상적인 접근|자동입력 방지|접근이 차단'; then
+                challenge="yes"
+              fi
+            fi
+
+            if [ "$bytes" -ge "$MIN_BODY_BYTES" ] 2>/dev/null && [ "$html_marker" = "yes" ]; then
+              body_received="yes"
+            elif [ "$bytes" -gt 0 ] 2>/dev/null; then
+              body_received="partial"
+            else
+              body_received="no"
+            fi
+
+            # 6) 판정
+            if [ "$challenge" = "yes" ]; then
+              result="BLOCKED"; note="봇 차단/CAPTCHA 화면 감지 — 우회하지 않음"
+            elif [ "$http_code" = "401" ] || [ "$http_code" = "403" ] \
+              || [ "$http_code" = "429" ] || [ "$http_code" = "451" ]; then
+              result="BLOCKED"; note="HTTP ${http_code}"
+            elif [ "$http_code" = "200" ] && [ "$body_received" = "yes" ]; then
+              result="PASS"; note=""
+            elif [ "$http_code" = "200" ]; then
+              result="PARTIAL"
+              note="HTTP 200이나 본문 빈약 (${bytes}B, html_marker=${html_marker})"
+            elif [ "$http_code" = "000" ]; then
+              result="ERROR"; note="연결 실패/타임아웃"
+            elif [ "${http_code#5}" != "$http_code" ]; then
+              result="ERROR"; note="서버 오류 HTTP ${http_code}"
+            else
+              result="PARTIAL"; note="HTTP ${http_code}"
+            fi
+
+            if [ "$redirects" != "0" ] && [ "$redirects" != "-" ]; then
+              note="${note}${note:+; }redirect ${redirects}회 -> ${final_url}"
+            fi
+            if [ "$robots_status" != "200" ]; then
+              note="${note}${note:+; }robots.txt ${robots_status}"
+            fi
+
+            emit "$category" "$name" "$domain" "$dns" "$tls" "$http_code" "$redirects" \
+                 "$body_received" "$bytes" "$latency" "$robots_status" "$result" "$note"
+          }
+
+          for entry in "${SOURCES[@]}"; do
+            c="${entry%%|*}"
+            rest="${entry#*|}"
+            n="${rest%%|*}"
+            u="${rest#*|}"
+            echo "── probing [${c}] ${n} — ${u}"
+            probe_one "$c" "$n" "$u"
+            sleep "$POLITE_DELAY"
+          done
+
+          # 리포트
+          {
+            echo "### 결과"
+            echo ""
+            echo "| Category | Source | Domain | DNS | TLS | HTTP | Redir | Body | Bytes | Latency(s) | robots | Result | Note |"
+            echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+            while IFS=$'\t' read -r c n d dns tls http rd body by lat rb res note; do
+              echo "| ${c} | ${n} | \`${d}\` | ${dns} | ${tls} | ${http} | ${rd} | ${body} | ${by} | ${lat} | ${rb} | **${res}** | ${note} |"
+            done < "$RESULTS"
+            echo ""
+            echo "### 집계"
+            echo ""
+            echo "| 판정 | 건수 |"
+            echo "|---|---|"
+            for r in PASS PARTIAL BLOCKED ERROR SKIPPED; do
+              echo "| ${r} | $(awk -F'\t' -v r="$r" '$12==r' "$RESULTS" | wc -l) |"
+            done
+            echo ""
+            echo "### GA-1 판정 기준"
+            echo ""
+            echo "- **Beauty PASS**: $(awk -F'\t' '$1=="BEAUTY" && $12=="PASS"' "$RESULTS" | wc -l) / 5 — 3곳 이상이어야 AXIS 2 성립 (B1)"
+            echo "- **Tier 1 PASS**: $(awk -F'\t' '$1=="TIER1" && $12=="PASS"' "$RESULTS" | wc -l) / 10 — 2곳 이상이어야 Tier 1 First 집행 가능 (B3)"
+            echo "- **대조군 example.com**: $(awk -F'\t' '$1=="CONTROL" {print $12}' "$RESULTS") — BLOCKED/ERROR면 환경 전체 차단 (PHASE C와 동일 증상)"
+            echo ""
+            echo "> 범례 — **PASS**: DNS+TLS 정상, HTTP 200, 본문 ${MIN_BODY_BYTES}B 이상 + HTML/XML 마커 확인."
+            echo "> **PARTIAL**: 도달했으나 본문 빈약하거나 2xx 아님. **BLOCKED**: 401/403/429/451 또는 봇차단 화면."
+            echo "> **ERROR**: DNS/TLS/연결 실패 또는 5xx. **SKIPPED**: robots.txt 전역 Disallow로 요청 자체를 보내지 않음."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo ""
+          echo "===== RESULTS (TSV) ====="
+          cat "$RESULTS"
+
+      - name: Guard — 저장소를 변경하지 않음을 확인
+        run: |
+          set -uo pipefail
+          echo "checkout 하지 않았으므로 워크스페이스에 저장소 파일이 없다:"
+          ls -A . || echo "(empty)"
+          echo "permissions: contents: read — 커밋/push 단계 없음."
