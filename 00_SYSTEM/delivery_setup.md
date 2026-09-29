@@ -11,7 +11,7 @@
 |---|---|---|
 | 프로젝트 구조 | **완료** | CLAUDE.md, 00_SYSTEM, 01_WEEKLY_BRIEFS, 02_TREND_TRACKER, `/weekly-brief` Skill |
 | Weekly Brief 생성 | **수동 실행 가능** | `/weekly-brief` 실행 시 Markdown 생성 |
-| Gmail 연결 | **완료** | claude.ai Gmail 커넥터 인증됨 (계정 `shpark250203@gmail.com`) |
+| Gmail 연결 | **완료** | claude.ai Gmail 커넥터 인증됨 (계정 `s***@gmail.com`) |
 | 발송 권한 | **확인됨** | 읽기 전용 아님 — 실제 발송 1회 성공 |
 | 메일 발송 검증 | **완료 (1회)** | 2026-09-23 17:46 KST, 본인 앞 TEST 발송. Gmail 스레드에서 수신 확인 |
 | 메일 본문 포맷 | **확정** | 인라인 스타일 HTML (`_final.html`). Markdown 원문은 아카이브용 |
@@ -42,7 +42,7 @@
 |---|---|
 | 발송 일시 | 2026-09-23 17:46 KST |
 | 제목 | `[TEST] WEEKLY INTELLIGENCE — 2026-W38` |
-| 수신 | `shpark250203@gmail.com` (본인) |
+| 수신 | `s***@gmail.com` (본인) |
 | 본문 | 인라인 스타일 HTML, 첨부 없음 |
 | 결과 | 수신 확인 — 레이아웃·범례·링크 정상 |
 | 발송 수단 | claude.ai Gmail 커넥터 (수동 승인 발송) |
@@ -67,7 +67,7 @@
 |---|---|
 | 제목 (정식) | `[WEEKLY INTELLIGENCE] <YYYY>-W<주차> 경제 · 산업 · 유통 · Beauty Weekly Brief` |
 | 제목 (테스트) | `[TEST] WEEKLY INTELLIGENCE — <YYYY>-W<주차>` |
-| 수신 | `shpark250203@gmail.com` (본인) — 추가 수신자 미정 |
+| 수신 | `s***@gmail.com` (본인) — 추가 수신자 미정. 실제 값은 `WIB_RECIPIENT`로만 주입 |
 | 본문 형식 | **인라인 스타일 HTML** (외부 CSS·스크립트 없음, max-width 640px) |
 | 본문 구성 | WEEKLY MUST KNOW → MARKET SNAPSHOT → KOREA BUSINESS WATCH → AXIS 2 → NEW PRODUCT WATCH(KR/US/JP) → EARLY BEAUTY WATCHLIST → WATCH LIST |
 | 범례 | `FACT` / `CLAIM` / `MEDIA` / `ANALYSIS` 4분류 |
@@ -225,7 +225,7 @@
 | 항목 | 값 |
 |---|---|
 | 커넥터명 | Gmail |
-| `connector_uuid` | `997bf03d-6acc-47ea-b7dc-da7943ce5edb` |
+| `connector_uuid` | **저장소에 기록하지 않는다** — Routine 설정에만 존재 (`cloud_runbook.md` §4) |
 | URL | `https://gmailmcp.googleapis.com/mcp/v1` |
 | 사용 방법 | Routine 생성 시 `mcp_connections`에 위 3개 필드를 넣어 연결 |
 
