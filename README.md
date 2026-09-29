@@ -35,7 +35,7 @@ CLAUDE.md                        프로젝트 운영 원칙
 | 모드 | 방법 | 자동 발송 |
 |---|---|---|
 | **LOCAL** | `/weekly-brief` | **금지** — 파일 생성 후 보고만. 발송은 사용자 승인 후 |
-| **CLOUD** | 스케줄 Routine | `CLOUD_MODE=true` **이고** Gate G1~G7 전부 통과 시에만 |
+| **CLOUD** | 스케줄 Routine | **실행 환경의** `CLOUD_MODE` 조회값이 `true`(G0) **이고** Gate G0~G7 전부 통과 시에만 |
 
 발송 판단 규격은 `00_SYSTEM/send_gate.md`를 따른다. **FAIL CLOSED** — 판단이 서지 않으면 보내지 않는다.
 
