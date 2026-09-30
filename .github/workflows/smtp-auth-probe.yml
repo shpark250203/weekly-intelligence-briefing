@@ -1,0 +1,237 @@
+# GA-2B — SMTP AUTH Probe
+#
+# 목적: GitHub Actions 러너에서 Gmail SMTP **인증까지** 가능한지 확인한다.
+#       GA-2(smtp-probe.yml)는 EHLO까지만 확인했고 AUTH는 수행하지 않았다.
+#
+# 수행하는 SMTP 절차 (이게 전부다):
+#   1 TCP connect  2 EHLO  3 STARTTLS  4 TLS 인증서 검증
+#   5 EHLO again   6 LOGIN  7 NOOP     8 QUIT
+#
+# 절대 하지 않는 것 (코드에 존재하지 않으며, 실행 전 정적 검사로 재확인한다):
+#   - sendmail() / send_message() / MAIL FROM / RCPT TO / DATA
+#   - 실제 메일 발송, Draft 생성
+#   - Secret 값 출력 (App Password·username 전체)
+#   - TLS 검증 비활성화 (check_hostname / verify_mode 를 건드리지 않는다)
+#   - schedule 자동 실행 (workflow_dispatch 전용)
+#   - 저장소 쓰기 (permissions: contents: read, checkout 하지 않음)
+#
+# 출력: TCP / TLS / AUTH / NOOP / Overall 의 PASS·FAIL 과
+#       실패 시 SMTP status code · 오류 category 뿐이다.
+
+name: GA-2B SMTP AUTH Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ga2b-smtp-auth-probe
+  cancel-in-progress: false
+
+jobs:
+  auth-probe:
+    name: Probe Gmail SMTP AUTH (no mail sent)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Write probe script
+        run: |
+          set -uo pipefail
+          mkdir -p "${RUNNER_TEMP}/ga2b"
+          cat > "${RUNNER_TEMP}/ga2b/auth_probe.py" <<'PYEOF'
+          # GA-2B SMTP AUTH Probe — 인증까지만 확인한다. 메일을 보내지 않는다.
+          import os
+          import smtplib
+          import socket
+          import ssl
+
+          HOST = "smtp.gmail.com"
+          PORT = 587
+          TIMEOUT = 30
+
+          steps = {"TCP": "FAIL", "TLS": "FAIL", "AUTH": "FAIL", "NOOP": "FAIL"}
+          category = None
+          smtp_code = None
+          notes = []
+          tls_proto = None
+          tls_cipher = None
+
+
+          class ProbeStop(Exception):
+              pass
+
+
+          def mask_email(value):
+              """s***@gmail.com 형태로만 남긴다. 전체 주소를 출력하지 않는다."""
+              if not value or "@" not in value:
+                  return "(형식 확인 불가)"
+              local, _, domain = value.partition("@")
+              head = local[0] if local else "?"
+              return head + "***@" + domain
+
+
+          user_raw = os.environ.get("GMAIL_USERNAME", "")
+          pw_raw = os.environ.get("GMAIL_APP_PASSWORD", "")
+
+          user = user_raw.strip()
+          pw = pw_raw.replace(" ", "").strip()
+
+          if pw_raw != pw:
+              notes.append(
+                  "App Password에 공백·여백이 포함되어 있어 제거 후 인증했다. "
+                  "Secret을 공백 없는 16자로 다시 저장할 것을 권고한다."
+              )
+          if user_raw != user:
+              notes.append("GMAIL_USERNAME에 여백이 포함되어 있어 제거 후 인증했다.")
+
+          smtp = None
+          try:
+              if not user or not pw:
+                  category = "SECRET_MISSING"
+                  raise ProbeStop()
+
+              # 1) TCP connect
+              sock = socket.create_connection((HOST, PORT), timeout=TIMEOUT)
+              sock.close()
+              steps["TCP"] = "PASS"
+
+              # 2) EHLO
+              smtp = smtplib.SMTP(HOST, PORT, timeout=TIMEOUT)
+              code, _ = smtp.ehlo()
+              if code != 250:
+                  category = "EHLO_UNEXPECTED"
+                  smtp_code = code
+                  raise ProbeStop()
+
+              # 3) STARTTLS + 4) 인증서 검증
+              #    create_default_context() 는 check_hostname=True,
+              #    verify_mode=CERT_REQUIRED 상태다. 이 값을 낮추지 않는다.
+              ctx = ssl.create_default_context()
+              if not ctx.check_hostname or ctx.verify_mode != ssl.CERT_REQUIRED:
+                  category = "TLS_CONTEXT_WEAKENED"
+                  raise ProbeStop()
+              smtp.starttls(context=ctx)
+              steps["TLS"] = "PASS"
+              try:
+                  tls_proto = smtp.sock.version()
+                  cipher = smtp.sock.cipher()
+                  tls_cipher = cipher[0] if cipher else None
+              except Exception:
+                  pass
+
+              # 5) EHLO again
+              code, _ = smtp.ehlo()
+              if code != 250:
+                  category = "EHLO2_UNEXPECTED"
+                  smtp_code = code
+                  raise ProbeStop()
+
+              # 6) LOGIN  — 인증만 한다
+              smtp.login(user, pw)
+              steps["AUTH"] = "PASS"
+
+              # 7) NOOP
+              code, _ = smtp.noop()
+              if code == 250:
+                  steps["NOOP"] = "PASS"
+              else:
+                  category = "NOOP_UNEXPECTED"
+                  smtp_code = code
+
+          except ProbeStop:
+              pass
+          except ssl.SSLCertVerificationError:
+              category = "TLS_CERT_VERIFY_FAILED"
+          except ssl.SSLError:
+              category = "TLS_HANDSHAKE_ERROR"
+          except smtplib.SMTPAuthenticationError as e:
+              # 메시지 본문을 출력하지 않는다. 상태 코드만 기록한다.
+              category = "AUTH_REJECTED"
+              smtp_code = getattr(e, "smtp_code", None)
+          except smtplib.SMTPNotSupportedError:
+              category = "STARTTLS_NOT_SUPPORTED"
+          except smtplib.SMTPServerDisconnected:
+              category = "SERVER_DISCONNECTED"
+          except smtplib.SMTPResponseException as e:
+              category = "SMTP_RESPONSE_ERROR"
+              smtp_code = getattr(e, "smtp_code", None)
+          except smtplib.SMTPException as e:
+              category = "SMTP_ERROR_" + type(e).__name__
+          except socket.timeout:
+              category = "TCP_TIMEOUT"
+          except OSError as e:
+              category = "SOCKET_ERROR_" + type(e).__name__
+          finally:
+              # 8) QUIT
+              if smtp is not None:
+                  try:
+                      smtp.quit()
+                  except Exception:
+                      pass
+
+          overall = "PASS" if all(v == "PASS" for v in steps.values()) else "FAIL"
+
+          lines = []
+          lines.append("| 단계 | 결과 |")
+          lines.append("|---|---|")
+          lines.append("| TCP | **%s** |" % steps["TCP"])
+          lines.append("| TLS | **%s** |" % steps["TLS"])
+          lines.append("| AUTH | **%s** |" % steps["AUTH"])
+          lines.append("| NOOP | **%s** |" % steps["NOOP"])
+          lines.append("| **Overall** | **%s** |" % overall)
+
+          diag = []
+          diag.append("- 계정: `%s` (마스킹)" % mask_email(user))
+          if tls_proto:
+              diag.append("- TLS: %s / %s" % (tls_proto, tls_cipher or "-"))
+          if category:
+              diag.append("- 오류 category: `%s`" % category)
+          if smtp_code is not None:
+              diag.append("- SMTP status code: `%s`" % smtp_code)
+          for n in notes:
+              diag.append("- NOTE: %s" % n)
+          diag.append("- 발송 API 호출: **없음** (메일 전송 명령을 사용하지 않았다)")
+
+          body = "\n".join(lines) + "\n\n" + "\n".join(diag) + "\n"
+
+          print(body)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("## GA-2B SMTP AUTH Probe\n\n")
+                  fh.write(body)
+                  fh.write("\n> 이 실행은 메일을 보내지 않았다. ")
+                  fh.write("LOGIN 성공 여부만 확인하고 NOOP 후 QUIT 했다.\n")
+
+          raise SystemExit(0 if overall == "PASS" else 1)
+          PYEOF
+          echo "probe script written."
+
+      - name: Guard — 발송 명령이 없는지 정적 검사
+        run: |
+          set -uo pipefail
+          SCRIPT="${RUNNER_TEMP}/ga2b/auth_probe.py"
+          echo "금지 호출 검사 (주석 제외, 호출 구문만):"
+          if grep -nE '^[^#]*(\.(sendmail|send_message)[[:space:]]*\(|docmd[[:space:]]*\([[:space:]]*.(MAIL|RCPT|DATA))' "$SCRIPT"; then
+            echo "::error::발송 관련 호출이 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건. 발송 경로 없음 확인."
+          echo "TLS 검증 무력화 검사:"
+          if grep -nE '^[^#]*(CERT_NONE|check_hostname\s*=\s*False|_create_unverified)' "$SCRIPT"; then
+            echo "::error::TLS 검증을 낮추는 코드가 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건. 인증서 검증 유지 확인."
+
+      - name: Run SMTP AUTH probe
+        env:
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          set -uo pipefail
+          python3 --version
+          python3 "${RUNNER_TEMP}/ga2b/auth_probe.py"

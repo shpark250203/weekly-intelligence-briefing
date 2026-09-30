@@ -378,13 +378,30 @@ GitHub Secrets에 OAuth 관련 값이 등록된 적도 없다. → **폐기해�
 | `smtp.set_debuglevel(1)` | **App Password가 로그에 출력된다** |
 | 예외 메시지 원문 출력 | 자격증명이 섞여 나올 수 있다 → **예외 유형만** 기록 (`SMTPAuthenticationError` 등) |
 
-### ⚠ 미검증 — GA-3에서 먼저 확인할 것
+### SMTP 연결성 실측 — GA-2 Probe 결과 (2026-09-30)
 
-**GA-1 Connectivity Probe는 HTTPS(443)만 확인했다. 러너의 SMTP 아웃바운드(465/587)는 미검증이다.**
-GitHub-hosted 러너는 25번 포트를 차단하는 것이 일반적이며, 465/587도 보장되지 않는다.
+`.github/workflows/smtp-probe.yml` 수동 실행 결과.
 
-→ **GA-3 착수 시 SMTP 연결성 프로브를 파이프라인 구현보다 먼저 1회 실행한다.**
-   TCP 연결 + EHLO까지만 하고 **인증도 발송도 하지 않는다.** 여기서 막히면 발송 경로를 재설계해야 한다.
+| Port | Mode | Result | EHLO 250 | AUTH 광고 | TLS 검증 |
+|---|---|---|---|---|---|
+| 465 | 암시적 TLS | PARTIAL | **yes** | **yes** | UNKNOWN |
+| 587 | STARTTLS | PARTIAL | **yes** | **yes** | UNKNOWN |
+
+**판정: SMTP egress는 열려 있다. 차단이 아니다.**
+두 포트 모두 TCP 연결·TLS 핸드셰이크·`EHLO` 250 응답·`AUTH` 확장 광고까지 정상 확인되었다.
+
+**`TLS 검증 = UNKNOWN`은 프로브의 결함이지 TLS 실패가 아니다.**
+`openssl s_client -quiet` 옵션이 `Verification: OK` 출력까지 억제해 파싱하지 못했다.
+TLS 핸드셰이크 자체는 성공했다(성공하지 않았다면 EHLO 응답을 받을 수 없다).
+
+### ⚠ 남은 미검증 — AUTH (GA-2B에서 확인)
+
+**인증까지 가능한지는 아직 확인되지 않았다.** 데이터센터 IP에서의 Gmail 로그인 거부 가능성이 남아 있다.
+
+→ `.github/workflows/smtp-auth-probe.yml` (**GA-2B**)로 확인한다.
+   587/STARTTLS + `ssl.create_default_context()` 실검증 + `login()` + `NOOP` + `QUIT`.
+   **`sendmail()`·`send_message()`를 호출하지 않으며, 실행 전 정적 검사로 그 부재를 재확인한다.**
+   이 프로브가 TLS 검증 UNKNOWN 항목도 함께 해소한다.
 
 ## 3-3. Secret 구성
 
@@ -538,10 +555,11 @@ STEP 5  발송 :  gmail_send.py         — STEP 4가 ALL PASS일 때만 if: 조
 | ~~7~~ | ~~GitHub Secrets 3건 (OAuth)~~ | **DEPRECATED — 등록된 적 없음** |
 | **8** | **2단계 인증(2SV) 활성 확인** | **완료 2026-09-30 — ON** |
 | **9** | **App Password 생성** (`WIB GitHub Actions`) → **즉시** GitHub Secret 3건 등록: `GMAIL_USERNAME` · `GMAIL_APP_PASSWORD` · `WIB_RECIPIENT` | 진행 중 |
-| **10** | **SMTP 연결성 프로브** (§3-2) — TCP+EHLO만, **인증·발송 없음**. 러너의 465/587 개방 여부 확인 | 대기 |
-| **11** | 인증 확인 (발송·생성 없이) — Gemini 최소 호출 200 + **SMTP AUTH 성공 후 즉시 QUIT** | 대기 |
+| ~~10~~ | ~~SMTP 연결성 프로브 — TCP+EHLO만~~ | **완료 2026-09-30** — 465·587 모두 EHLO 250 + AUTH 광고 확인. **egress 열림** (§3-2) |
+| **11** | **GA-2B SMTP AUTH 프로브** — 587/STARTTLS + TLS 실검증 + `login()` + NOOP + QUIT. **발송 없음** | 진행 중 |
+| **12** | Gemini 최소 호출 200 확인 (Brief 생성 없이) | 대기 |
 
-STEP 11까지 끝나면 GA-2 완료다. **여기서도 Brief는 생성되지 않고 메일은 나가지 않는다.**
+STEP 12까지 끝나면 GA-2 완료다. **여기서도 Brief는 생성되지 않고 메일은 나가지 않는다.**
 
 > STEP 9에서 생성과 등록을 **하나의 단계로 묶는 이유**: App Password는 **생성 직후 한 번만 표시**되고
 > 이후 다시 볼 수 없다. 중간에 어딘가 적어 두는 상태를 만들지 않기 위해 즉시 Secret에 넣는다.
