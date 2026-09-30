@@ -244,8 +244,8 @@ GitHub Actions · Cloud Run · AWS Lambda · VPS · n8n 등 **Anthropic 밖에�
 
 | 방식 | 내용 | 적합성 |
 |---|---|---|
-| **① Gmail API OAuth (권장)** | 자체 Google Cloud 프로젝트 → OAuth Client(Desktop) 생성 → `gmail.send` scope 동의 → **refresh token** 확보 후 시크릿 저장소에 보관 | 개인 Gmail에 사용 가능 |
-| **② Gmail SMTP + 앱 비밀번호** | 2단계 인증 활성화 후 앱 비밀번호 발급, `smtp.gmail.com:587` | 간단하나 권한 범위가 넓음 |
+| ~~**① Gmail API OAuth**~~ | ~~자체 Google Cloud 프로젝트 → OAuth Client(Desktop) 생성 → `gmail.send` scope 동의 → **refresh token** 확보~~ | **DEPRECATED (2026-09-30)** — 개인 계정 주 1회 발송에 Production 게시·검증 절차가 과도해 중단. 설계 원문은 `ga2_auth_design.md` §3-D에 보존 |
+| **② Gmail SMTP + App Password** | 2단계 인증 활성화 후 App Password 발급, `smtp.gmail.com` **465 암시적 TLS**(대체 587 STARTTLS) | **채택 (2026-09-30)** — 권한 범위가 넓은 대신 **개별 폐기가 즉시 가능**. 실제 계정 비밀번호는 사용하지 않는다. 규격: `ga2_auth_design.md` §3 |
 | **③ 서비스 계정 + 도메인 위임** | — | **개인(소비자) Gmail 계정에는 사용 불가.** Google Workspace 전용 |
 
 어느 쪽이든 자격증명은 **평문으로 프로젝트 폴더에 두지 않는다.**
@@ -320,3 +320,4 @@ Tier 1 직접 확인률이 로컬 대비 떨어질 수 있다. 이것은 실행�
 | 2026-09-23 | 프로젝트 생성, 발송·스케줄 미설정 상태로 문서 개설 | — |
 | 2026-09-23 | W38 메일 검수 결과(rev.2) 및 TEST 발송 검증 반영, 메일 형식 확정 | STEP 1·2 완료 |
 | 2026-09-23 | 자동화 A/B 비교 설계안, Gmail 인증 재사용 확인 결과, 전환 계획 추가 | **설계만. 리소스 미생성** |
+| 2026-09-30 | 실행 경로를 **GitHub Actions + Gemini Free Tier**로 확정. §5-2 표의 ① OAuth를 **DEPRECATED**, **② SMTP + App Password를 채택**으로 변경 | 발송 미실행. 규격은 `ga2_auth_design.md` rev.4 |

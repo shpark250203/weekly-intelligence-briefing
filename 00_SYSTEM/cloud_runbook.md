@@ -7,15 +7,36 @@
 
 ## 1. 현재 진행 상태
 
+### 1-1. 경로 1 — Claude Cloud Routine (중단)
+
 | PHASE | 내용 | 상태 |
 |---|---|---|
-| **A** | Git 저장소 구조 + 클라우드 실행용 파일 구성 | **완료 (로컬 전용)** |
-| **B** | Cloud Workflow 생성 — `enabled: false` | **미착수** |
-| **C** | 수동 Cloud 실행 1회 | 미착수 |
-| **D** | 로컬 파일럿 vs Cloud 결과 QA 비교 | 미착수 |
-| **E** | 월 08:00 KST 자동 실행 활성화 | 미착수 |
+| **A** | Git 저장소 구조 + 클라우드 실행용 파일 구성 | **완료** |
+| **B** | Cloud Routine 생성 — `enabled: false` | **완료** |
+| **C** | 수동 Cloud 실행 1회 | **완료 — 실행은 성공, 품질 측정은 실패** |
+| **D** | 로컬 파일럿 vs Cloud 결과 QA 비교 | **완료 — PHASE E 판정 NO** |
+| **E** | 월 08:00 KST 자동 실행 활성화 | **중단** |
 
-**아직 자동 발송되는 것은 없다.** GitHub 원격 저장소도 생성되지 않았다.
+중단 사유: 클라우드 세션의 **network egress 전면 차단** + 저장소 쓰기 권한 부재 + 환경변수 주입 경로 부재.
+상세 실측 기록은 `03_AUTOMATION_TESTS/claude_cloud_phase_c/`.
+**Routine은 삭제하지 않고 `enabled: false`로 유지한다.**
+
+### 1-2. 경로 2 — GitHub Actions (현재 진행)
+
+| PHASE | 내용 | 상태 |
+|---|---|---|
+| **GA-1** | 연결성 실측 (Source 접근 가능 여부) | **PASS (2026-09-29)** — `03_AUTOMATION_TESTS/github_actions_ga1/ga1_connectivity_result.md` |
+| **GA-2** | AI 엔진 · Gmail API 인증 설계 및 Secret 준비 | **진행 중** — `ga2_auth_design.md` rev.2 |
+| **GA-3** | 파이프라인 구현 + W38 품질 비교 (발송 없음) | 미착수 |
+| **GA-4** | `schedule:` 활성화 + `CLOUD_MODE` Variable 주입 | 미착수 |
+
+**실행 엔진 결정 (2026-09-30)**: 월 운영비 0원 목표에 따라 **Gemini API Free Tier**(`gemini-3.8-flash`)를
+채택하고, 에이전트 루프 대신 **결정론적 수집 + 판단 배치 호출의 2계층 구조**로 간다.
+Anthropic API는 품질 미달 시 **수동 전환용 Fallback**으로만 남긴다 (`ga2_auth_design.md` §7).
+**Anthropic API Key·Billing·Workspace는 생성하지 않는다.**
+
+**아직 자동 발송되는 것은 없다.** GitHub Actions에는 `workflow_dispatch` 전용 프로브 1건만 존재하며,
+Secret·Variable은 등록되지 않았다.
 
 ---
 
@@ -77,7 +98,9 @@
 
 ## 4. Secret 취급
 
-**이 저장소에 보관하는 Secret — 0건.**
+**이 저장소 파일에 기록하는 Secret 값 — 0건.** (경로와 무관하게 불변)
+
+### 4-1. 경로 1 — Claude Cloud Routine *(DEPRECATED — 중단됨)*
 
 | 필요 인증 | 조달 | 저장소 기록 |
 |---|---|---|
@@ -85,9 +108,21 @@
 | Gmail 발송 | claude.ai Gmail 커넥터 연결 | ✕ |
 | 저장소 접근·푸시 | 클라우드 환경의 GitHub 연결 권한 | ✕ |
 
-- GitHub Secrets / Secret Manager에 **등록할 항목 없음** (GitHub Actions를 쓰지 않음).
-- 커넥터 식별자(UUID)도 이 저장소에 기록하지 않는다. Routine 설정에만 존재한다.
-- Secret 값을 생성·출력·커밋하지 않는다.
+### 4-2. 경로 2 — GitHub Actions *(현행)*
+
+| 필요 인증 | 조달 | GitHub Secret 이름 | 저장소 기록 |
+|---|---|---|---|
+| AI 판단 (Gemini Free Tier) | Google AI Studio API Key | `GEMINI_API_KEY` | ✕ |
+| Gmail 발송 (SMTP) | **Google App Password** (2SV 필요) | `GMAIL_APP_PASSWORD` | ✕ |
+| 발신 계정 | 본인 Gmail 주소 | `GMAIL_USERNAME` | **✕ 절대 금지** |
+| 수신 주소 | 본인 Gmail 주소 | `WIB_RECIPIENT` | **✕ 절대 금지** |
+| 저장소 접근·푸시 | Actions 기본 `GITHUB_TOKEN` | (자동 주입) | ✕ |
+
+- **DEPRECATED (등록된 적 없음)**: `GMAIL_CLIENT_ID` · `GMAIL_CLIENT_SECRET` · `GMAIL_REFRESH_TOKEN`
+  — OAuth 방식 중단(2026-09-30). 설계 원문은 `ga2_auth_design.md` §3-D에 보존.
+- **실제 Google 계정 비밀번호는 사용하지 않는다.** App Password만 쓴다.
+- 커넥터 식별자(UUID)·Google Cloud 프로젝트 ID도 이 저장소에 기록하지 않는다.
+- Secret 값을 생성·출력·커밋하지 않는다. 실행 로그에도 출력하지 않는다.
 
 ---
 
@@ -127,3 +162,6 @@
 | 날짜 | 변경 |
 |---|---|
 | 2026-09-23 | PHASE A — 최초 작성. 아키텍처·환경변수 계약·Secret 취급·Rollback 확정. 리소스 미생성 |
+| 2026-09-30 | §1을 실제 진행 상태로 갱신. 경로 1(Claude Cloud Routine) B~D 완료·E 중단, 경로 2(GitHub Actions) GA-1 PASS·GA-2 진행 중으로 분리 기록. **§2~§6 아키텍처·Secret 취급·Rollback 원칙은 무변경** |
+| 2026-09-30 | 실행 엔진을 **Gemini API Free Tier**로 확정(월 운영비 0원 목표). §1-2에 결정 기록. **§4 Secret 취급 원칙은 무변경** — 다만 GitHub Actions 경로에서는 Secret이 GitHub Secrets에 존재한다(§4의 "저장소에 보관하는 Secret 0건"은 유지: 저장소 파일에 값을 두지 않는다는 뜻) |
+| 2026-09-30 | **Gmail 발송을 OAuth → App Password + SMTP로 전환.** §4를 경로별(4-1 Routine DEPRECATED / 4-2 GitHub Actions)로 분리하고 Secret 4건 확정. OAuth 3종은 DEPRECATED(등록 이력 없음)로 명시. **계정 비밀번호 사용 금지 원칙 추가.** 설계 상세는 `ga2_auth_design.md` rev.4 |

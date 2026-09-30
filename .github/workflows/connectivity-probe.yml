@@ -33,7 +33,7 @@ concurrency:
 jobs:
   probe:
     name: Probe Weekly Brief sources
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 장기 재현성을 위해 고정 (ubuntu-latest의 이미지 이동 방지)
     timeout-minutes: 20
 
     env:

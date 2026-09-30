@@ -54,3 +54,8 @@ desktop.ini
 # - 인증 토큰은 Claude Gmail 커넥터가 관리하며 이 폴더에 저장되지 않는다.
 # - 이 저장소에는 어떤 인증정보도 두지 않는다. Secret은 커밋 대상이 아니다.
 # - 수신 메일 주소도 저장소에 하드코딩하지 않는다(환경변수로만 전달).
+
+# ── Gmail App Password (절대 commit 금지) ─────────────────────
+app_password*
+apppassword*
+*.apppass

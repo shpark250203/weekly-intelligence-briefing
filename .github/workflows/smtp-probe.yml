@@ -1,0 +1,188 @@
+# GA-2 — SMTP Connectivity Probe
+#
+# 목적: GitHub Actions 러너에서 smtp.gmail.com 아웃바운드가 열려 있는지,
+#       TLS 인증서 검증이 정상 동작하는지 확인한다.
+#       GA-1은 HTTPS(443)만 확인했으므로 SMTP 경로는 미검증 상태다.
+#
+# 이 workflow가 하지 않는 것 (설계상 불가능하게 구성):
+#   - SMTP 인증 없음        (AUTH 명령을 보내지 않는다)
+#   - 메일 발송 없음         (MAIL FROM / RCPT TO / DATA 를 보내지 않는다)
+#   - Secret 사용 없음       (secrets 컨텍스트를 어디에서도 참조하지 않는다)
+#                            → App Password가 세션에 존재하지 않는다
+#   - Brief 생성 없음
+#   - AI API 호출 없음
+#   - schedule 없음          (workflow_dispatch 전용)
+#   - 저장소 쓰기 없음       (permissions: contents: read, checkout 하지 않음)
+#   - 비용 발생 없음
+#
+# 보내는 명령: EHLO → QUIT 뿐이다.
+
+name: GA-2 SMTP Connectivity Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ga2-smtp-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Probe smtp.gmail.com egress
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    env:
+      SMTP_HOST: smtp.gmail.com
+      EHLO_NAME: wib-probe.invalid
+
+    steps:
+      - name: Runner environment fingerprint
+        run: |
+          set -uo pipefail
+          {
+            echo "## GA-2 SMTP Connectivity Probe"
+            echo ""
+            echo "- Run started (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "- Runner: ${RUNNER_OS} / ${RUNNER_ARCH}"
+            echo "- openssl: $(openssl version)"
+            echo "- 인증·발송 없음. EHLO / QUIT 만 전송한다."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Egress IP:"
+          curl -sS --max-time 15 https://api.ipify.org || echo "(조회 실패)"
+          echo ""
+          echo "DNS 해석 — ${SMTP_HOST}:"
+          getent hosts "$SMTP_HOST" || echo "(DNS 실패)"
+
+      - name: Probe SMTP ports
+        run: |
+          set -uo pipefail
+
+          WORK="$(mktemp -d)"
+          RESULTS="${WORK}/results.tsv"
+          : > "$RESULTS"
+
+          # TCP 도달 가능 여부만 확인 (데이터 전송 없음)
+          tcp_open() {
+            port="$1"
+            timeout 10 bash -c "cat < /dev/null > /dev/tcp/${SMTP_HOST}/${port}" 2>/dev/null
+          }
+
+          emit() {
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "$RESULTS"
+          }
+
+          # ── 465: 암시적 TLS (설계상 주 포트) ──────────────────
+          probe_465() {
+            port=465; mode="implicit TLS"
+            if ! tcp_open "$port"; then
+              emit "$port" "$mode" "CLOSED" "-" "-" "-" "TCP 연결 실패 — 차단된 것으로 보임"
+              return
+            fi
+            out="${WORK}/465.txt"
+            printf 'EHLO %s\r\nQUIT\r\n' "$EHLO_NAME" \
+              | timeout 30 openssl s_client -connect "${SMTP_HOST}:${port}" \
+                  -servername "$SMTP_HOST" -crlf -quiet > "$out" 2>&1 || true
+            evaluate "$port" "$mode" "$out"
+          }
+
+          # ── 587: STARTTLS (대체 포트) ─────────────────────────
+          probe_587() {
+            port=587; mode="STARTTLS"
+            if ! tcp_open "$port"; then
+              emit "$port" "$mode" "CLOSED" "-" "-" "-" "TCP 연결 실패 — 차단된 것으로 보임"
+              return
+            fi
+            out="${WORK}/587.txt"
+            printf 'EHLO %s\r\nQUIT\r\n' "$EHLO_NAME" \
+              | timeout 30 openssl s_client -starttls smtp \
+                  -connect "${SMTP_HOST}:${port}" \
+                  -servername "$SMTP_HOST" -crlf -quiet > "$out" 2>&1 || true
+            evaluate "$port" "$mode" "$out"
+          }
+
+          evaluate() {
+            p="$1"; m="$2"; f="$3"
+            verify="UNKNOWN"; ehlo="no"; auth="no"; note=""
+
+            if grep -qi 'Verification: OK' "$f"; then
+              verify="OK"
+            elif grep -qi 'Verification error' "$f"; then
+              verify="FAIL"
+              note="$(grep -i 'Verification error' "$f" | head -n1 | tr -d '\r')"
+            fi
+
+            # EHLO 응답 250 확인
+            if grep -qE '^250[ -]' "$f"; then ehlo="yes"; fi
+            # AUTH 확장 광고 여부 (호출하지 않는다 — 광고 여부만 본다)
+            if grep -qiE '^250[ -]AUTH' "$f"; then auth="yes"; fi
+
+            if [ "$verify" = "OK" ] && [ "$ehlo" = "yes" ] && [ "$auth" = "yes" ]; then
+              res="PASS"
+            elif [ "$ehlo" = "yes" ]; then
+              res="PARTIAL"
+              [ -z "$note" ] && note="EHLO는 응답하나 TLS검증=${verify} / AUTH광고=${auth}"
+            else
+              res="FAIL"
+              [ -z "$note" ] && note="$(head -c 160 "$f" | tr '\n\t' '  ')"
+            fi
+
+            emit "$p" "$m" "$res" "$verify" "$ehlo" "$auth" "$note"
+          }
+
+          probe_465
+          probe_587
+
+          # ── 25: 대조군. 차단이 정상이다 ──────────────────────
+          if tcp_open 25; then
+            emit "25" "plaintext (대조군)" "OPEN" "-" "-" "-" "열려 있음 — 설계상 사용하지 않는다"
+          else
+            emit "25" "plaintext (대조군)" "CLOSED" "-" "-" "-" "차단됨 — 예상된 정상 결과"
+          fi
+
+          # ── 리포트 ───────────────────────────────────────────
+          {
+            echo "### 결과 — smtp.gmail.com"
+            echo ""
+            echo "| Port | Mode | Result | TLS 검증 | EHLO 250 | AUTH 광고 | Note |"
+            echo "|---|---|---|---|---|---|---|"
+            while IFS=$'\t' read -r p m r v e a n; do
+              echo "| ${p} | ${m} | **${r}** | ${v} | ${e} | ${a} | ${n} |"
+            done < "$RESULTS"
+            echo ""
+            echo "### GA-2 판정 기준"
+            echo ""
+            p465="$(awk -F'\t' '$1==465 {print $3}' "$RESULTS")"
+            p587="$(awk -F'\t' '$1==587 {print $3}' "$RESULTS")"
+            echo "- **465 (주 포트)**: ${p465} — PASS면 설계대로 진행"
+            echo "- **587 (대체)**: ${p587} — 465가 막혔을 때만 사용"
+            if [ "$p465" = "PASS" ] || [ "$p587" = "PASS" ]; then
+              echo ""
+              echo "> **판정: 발송 경로 확보 가능.** 최소 한 포트가 TLS 검증까지 통과했다."
+            else
+              echo ""
+              echo "> **판정: 발송 경로 없음.** 러너에서 SMTP가 차단된다."
+              echo "> 파이프라인 구현 전에 발송 방식을 재설계해야 한다."
+            fi
+            echo ""
+            echo "> 이 실행은 **AUTH를 보내지 않았고 메일을 보내지 않았다.**"
+            echo "> 전송한 명령은 EHLO / QUIT 뿐이며, Secret은 세션에 주입되지 않았다."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo ""
+          echo "===== RESULTS (TSV) ====="
+          cat "$RESULTS"
+
+      - name: Guard — 저장소·Secret 미사용 확인
+        run: |
+          set -uo pipefail
+          echo "checkout 하지 않았으므로 워크스페이스가 비어 있다:"
+          ls -A . || echo "(empty)"
+          echo "permissions: contents: read — 커밋/push 단계 없음."
+          echo "이 workflow는 secrets 컨텍스트를 참조하지 않는다."

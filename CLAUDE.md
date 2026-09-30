@@ -401,7 +401,15 @@ CLOUD MODE는 사전 승인된 스케줄 실행에 한해 허용되며, LOCAL MO
 
 - **수신 메일 주소를 코드·Markdown·저장소 파일에 하드코딩하지 않는다.** 환경변수 `WIB_RECIPIENT`로만 주입한다.
 - 저장소에 인증정보(API 키·OAuth 토큰·앱 비밀번호)를 두지 않는다.
+- **Gmail 발송은 App Password + SMTP로만 한다.** 실제 Google 계정 비밀번호를 사용하지 않는다.
+  App Password는 GitHub Secret `GMAIL_APP_PASSWORD`에만 두고, SMTP는 TLS 검증을 켠 채로 쓴다.
+  로그에 SMTP 디버그를 켜지 않는다(자격증명이 출력된다). 상세는 `00_SYSTEM/ga2_auth_design.md` §3.
 - Secret 값을 화면·로그·커밋 메시지에 출력하지 않는다.
+- **AI 프롬프트 최소노출**: Gemini API **무료 티어는 제출한 콘텐츠가 Google 제품 개선에 사용될 수 있다**
+  (공식 Pricing 기준 Free tier "Yes" / Paid tier "No", 2026-09-30 확인).
+  따라서 AI에 보내는 내용은 **공개된 기사 본문 발췌와 선별 규칙으로 한정**하고,
+  **수신 주소·Secret·로컬 경로·발송 이력은 프롬프트에 넣지 않는다.**
+  상세는 `00_SYSTEM/ga2_auth_design.md` §2-6.
 
 ## 10-3. 중복 발송 방지
 
@@ -423,6 +431,7 @@ CLAUDE.md는 원칙을 정의하고, 세부 실행 규칙은 아래 파일이 �
 - `00_SYSTEM/send_gate.md` — 발송 모드 분기 및 자동발송 차단 규격 (10-1~10-3장의 실행판)
 - `00_SYSTEM/cloud_runbook.md` — 클라우드 자동 실행 운영 절차·Rollback
 - `00_SYSTEM/qa_cloud_vs_local.md` — QA 기준선(W38) 대비 Cloud 결과 비교표
+- `00_SYSTEM/ga2_auth_design.md` — GitHub Actions 실행 설계 (Gemini Free Tier 2계층 구조 · Gmail OAuth · Secret 이름 · Fail Closed · Anthropic Fallback)
 - `00_SYSTEM/source_ledger.csv` — 핵심 정량 데이터 누적 기록
 - `00_SYSTEM/send_ledger.csv` — 주차별 발송 기록 (중복 발송 방지용)
 - `02_TREND_TRACKER/new_product_signals.csv` — 국가별 Trend Signal 주간 누적 (6장의 실행판)
