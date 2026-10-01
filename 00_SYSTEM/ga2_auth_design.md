@@ -434,6 +434,49 @@ TLS 핸드셰이크 자체는 성공했다(성공하지 않았다면 EHLO 응답
    Weekly Brief 생성·Gemini 호출·`CLOUD_MODE`는 이 단계에 포함되지 않는다.
    이는 `send_gate.md` §1-2가 허용하는 **LOCAL MODE 수동 테스트 경로**다 (G0 우회가 아니다).
 
+#### GA-2C 1차 실행 결과 (2026-10-01) — FAIL, 발송 0통
+
+| 단계 | 결과 |
+|---|---|
+| CONNECT | PASS |
+| TLS | PASS |
+| AUTH | **FAIL** |
+| SEND | FAIL (시도되지 않음) |
+| **Overall** | **FAIL** |
+
+`Error category: SERVER_DISCONNECTED` — Gmail이 **응답 코드 없이 연결을 끊었다.**
+
+**같은 Secret을 쓰는 GA-2B는 직전 실행에서 AUTH PASS였다.**
+따라서 자격증명 문제로 단정할 수 없다. 구현 차이를 먼저 전수 대조했다.
+
+**대조 결과 — 인증 경로의 구현 차이는 1개뿐이었다.**
+
+| 항목 | GA-2B | GA-2C 1차 | 동일 |
+|---|---|---|---|
+| HOST / PORT / TIMEOUT | `smtp.gmail.com` / 587 / 30 | 동일 | ✅ |
+| `smtplib.SMTP()` 인자 | `(HOST, PORT, timeout=TIMEOUT)` | 동일 | ✅ |
+| EHLO → STARTTLS → EHLO → LOGIN 순서 | 그대로 | 동일 | ✅ |
+| `ssl.create_default_context()` + 약화 검사 | 있음 | 동일 | ✅ |
+| `login()` 호출 위치 | 2차 EHLO 직후 | 동일 | ✅ |
+| Secret 참조 · 공백 제거 방식 | `os.environ.get` · `"".join(split())` | 동일 | ✅ |
+| `quit()` 위치 | `finally` | 동일 | ✅ |
+| **선행 `socket.create_connection` + `close()`** | **있음** | **없음** | ❌ |
+
+**즉 AUTH FAIL을 설명하는 구현 차이가 사실상 존재하지 않는다.**
+남은 유일한 차이(선행 TCP 연결)는 SMTP 대화를 하지 않는 연결이므로
+인증 성공/실패를 좌우할 기전이 없다.
+
+**가장 가능성 높은 원인: Gmail 측 일시적 인증 거부 (공유 러너 IP 대상 anti-abuse).**
+근거 — 같은 프로젝트에서 이미 **동일 코드·동일 Secret이 회차에 따라 다른 결과**를 냈다.
+GA-2B가 534로 실패한 뒤 자격증명을 바꾸지 않고 재실행해 PASS했다(위 기록).
+응답 코드 없는 절단은 정상적인 자격증명 거부(535/534)와 표면이 다르며 anti-abuse에 부합한다.
+
+**조치 — 추측으로 Secret을 건드리지 않고, 변수를 제거했다.**
+GA-2C의 CONNECT/TLS/AUTH 블록을 **GA-2B PASS 코드와 동일하게 복원**해
+구현을 비교 변수에서 제외했다. 이후 재실행에서도 AUTH가 실패하면
+**원인은 구현이 아니라 계정·IP 쪽**임이 확정된다.
+App Password 재발급·발송 방식 변경은 **하지 않았다.**
+
 ## 3-3. Secret 구성
 
 | Secret | 용도 | 상태 |

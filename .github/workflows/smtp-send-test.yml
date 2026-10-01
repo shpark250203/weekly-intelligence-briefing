@@ -73,9 +73,15 @@ jobs:
           cat > "${RUNNER_TEMP}/ga2c/send_test.py" <<'PYEOF'
           # GA-2C SMTP 발송 테스트 — 테스트 메일 1통만 보낸다.
           # Weekly Brief 를 만들지 않고, Gemini 를 호출하지 않는다.
+          #
+          # CONNECT / TLS / AUTH 블록은 GA-2B(smtp-auth-probe.yml)에서
+          # Overall PASS 한 코드를 **구조·순서·인자까지 그대로** 가져온 것이다.
+          # 이 블록을 GA-2C 사정에 맞춰 바꾸지 않는다 — 바꾸면 GA-2B 와의
+          # 비교 가능성이 사라지고 실패 원인이 다시 모호해진다.
           import os
           import re
           import smtplib
+          import socket
           import ssl
           from email.message import EmailMessage
 
@@ -91,10 +97,19 @@ jobs:
               "No Weekly Brief was generated.\n"
           )
 
-          steps = {"CONNECT": "FAIL", "TLS": "FAIL", "AUTH": "FAIL", "SEND": "FAIL"}
+          # GA-2B 와 같은 키를 쓴다 (TCP/TLS/AUTH). SEND 만 GA-2C 고유다.
+          steps = {"TCP": "FAIL", "TLS": "FAIL", "AUTH": "FAIL", "SEND": "FAIL"}
           category = None
           smtp_code = None
           smtp_detail = None
+          auth_fail_reason = None
+          # 발송이 일어났는지를 단계 표와 **별개로** 명시한다.
+          #   NOT_SENT_PRECHECK_FAILED  — Secret·수신자 검증에서 중단 (연결 전)
+          #   NOT_SENT_CONNECT_FAILED   — 연결·TLS 단계에서 중단
+          #   NOT_SENT_AUTH_FAILED      — 인증 실패로 중단 (발송 시도 자체를 안 함)
+          #   NOT_SENT_RECIPIENT_REFUSED— 인증은 됐으나 수신자가 거부됨
+          #   MAIL_SENT_1               — Gmail 이 1통을 수락함
+          delivery_state = "NOT_SENT_PRECHECK_FAILED"
           refused = None
           notes = []
           tls_proto = None
@@ -151,6 +166,38 @@ jobs:
               return text
 
 
+          def classify_auth_failure(code, text):
+              """GA-2B 와 동일한 분류 규칙. 응답 문구를 코드보다 먼저 본다."""
+              t = (text or "").lower()
+              if "application-specific password" in t or "5.7.9" in t:
+                  return "APP_PASSWORD_REQUIRED"
+              if (
+                  "web browser" in t
+                  or "5.7.14" in t
+                  or "websignin" in t
+                  or "signin/continue" in t
+              ):
+                  return "BROWSER_LOGIN_REQUIRED"
+              if (
+                  "username and password not accepted" in t
+                  or "badcredentials" in t
+                  or "5.7.8" in t
+              ):
+                  return "BAD_CREDENTIALS"
+              if (
+                  "disabled" in t
+                  or "suspended" in t
+                  or "not enabled" in t
+                  or "administrator" in t
+                  or "policy" in t
+                  or "not allowed" in t
+              ):
+                  return "ACCOUNT_POLICY"
+              if code == 535:
+                  return "BAD_CREDENTIALS"
+              return "UNKNOWN"
+
+
           smtp = None
           try:
               # Secret 존재 확인 — 없으면 네트워크에 닿기 전에 멈춘다.
@@ -166,18 +213,26 @@ jobs:
                   category = "RECIPIENT_FORMAT_INVALID"
                   raise ProbeStop()
 
-              # 1) 연결 + EHLO  (생성자가 TCP 연결과 220 그리팅을 함께 수행한다)
+              # 이 지점부터 연결이 시작된다 — 실패하면 연결 단계 실패로 기록한다.
+              delivery_state = "NOT_SENT_CONNECT_FAILED"
+
+              # ── 아래 CONNECT/TLS/AUTH 블록은 GA-2B PASS 코드 그대로다 ──
+              # 1) TCP connect
+              sock = socket.create_connection((HOST, PORT), timeout=TIMEOUT)
+              sock.close()
+              steps["TCP"] = "PASS"
+
+              # 2) EHLO
               smtp = smtplib.SMTP(HOST, PORT, timeout=TIMEOUT)
               code, _ = smtp.ehlo()
               if code != 250:
                   category = "EHLO_UNEXPECTED"
                   smtp_code = code
                   raise ProbeStop()
-              steps["CONNECT"] = "PASS"
 
-              # 2) STARTTLS + 3) 인증서 검증
+              # 3) STARTTLS + 4) 인증서 검증
               #    create_default_context() 는 check_hostname=True,
-              #    verify_mode=CERT_REQUIRED 다. 이 값을 낮추지 않는다.
+              #    verify_mode=CERT_REQUIRED 상태다. 이 값을 낮추지 않는다.
               ctx = ssl.create_default_context()
               if not ctx.check_hostname or ctx.verify_mode != ssl.CERT_REQUIRED:
                   category = "TLS_CONTEXT_WEAKENED"
@@ -189,18 +244,30 @@ jobs:
               except Exception:
                   pass
 
-              # 4) EHLO again
+              # 5) EHLO again
               code, _ = smtp.ehlo()
               if code != 250:
                   category = "EHLO2_UNEXPECTED"
                   smtp_code = code
                   raise ProbeStop()
 
-              # 5) LOGIN
+              # 인증 단계 진입 — 여기서 실패하면 발송 시도조차 하지 않는다.
+              delivery_state = "NOT_SENT_AUTH_FAILED"
+
+              # 6) LOGIN
               smtp.login(user, pw)
               steps["AUTH"] = "PASS"
+              # ── GA-2B 재사용 블록 끝. 이 아래부터가 GA-2C 고유다 ──
 
-              # 6) 발송 — 단 1통. 수신자 1명. 재시도 없음.
+              # 7) FAIL CLOSED — AUTH 가 PASS 가 아니면 발송하지 않는다.
+              #    login() 이 예외를 던지면 애초에 여기 도달하지 않지만,
+              #    "인증 확인 없이 발송하는 경로가 코드에 없다"는 것을
+              #    구조로 보장하기 위해 명시적으로 한 번 더 막는다.
+              if steps["AUTH"] != "PASS":
+                  category = "SEND_BLOCKED_AUTH_NOT_PASS"
+                  raise ProbeStop()
+
+              # 8) 발송 — 단 1통. 수신자 1명. 재시도 없음.
               msg = EmailMessage()
               msg["From"] = user
               msg["To"] = rcpt
@@ -211,9 +278,11 @@ jobs:
               if refused:
                   # 일부 수신자 거부 — 주소를 출력하지 않고 건수만 기록한다.
                   category = "RECIPIENT_REFUSED"
+                  delivery_state = "NOT_SENT_RECIPIENT_REFUSED"
                   notes.append("거부된 수신자 수: %d" % len(refused))
               else:
                   steps["SEND"] = "PASS"
+                  delivery_state = "MAIL_SENT_1"
 
           except ProbeStop:
               pass
@@ -225,8 +294,10 @@ jobs:
               category = "AUTH_REJECTED"
               smtp_code = getattr(e, "smtp_code", None)
               smtp_detail = sanitize(getattr(e, "smtp_error", None))
+              auth_fail_reason = classify_auth_failure(smtp_code, smtp_detail)
           except smtplib.SMTPRecipientsRefused as e:
               category = "RECIPIENTS_REFUSED_ALL"
+              delivery_state = "NOT_SENT_RECIPIENT_REFUSED"
               try:
                   smtp_code = list(e.recipients.values())[0][0]
               except Exception:
@@ -242,6 +313,11 @@ jobs:
               category = "STARTTLS_NOT_SUPPORTED"
           except smtplib.SMTPServerDisconnected:
               category = "SERVER_DISCONNECTED"
+              # TLS 는 통과했고 AUTH 만 실패했다면 인증 단계에서 끊긴 것이다.
+              # Gmail 이 응답 코드 없이 연결을 끊었으므로 자격증명 문제라고
+              # 단정할 수 없다 — 분류를 SERVER_DISCONNECTED 로만 남긴다.
+              if steps["TLS"] == "PASS" and steps["AUTH"] == "FAIL":
+                  auth_fail_reason = "SERVER_DISCONNECTED"
           except smtplib.SMTPResponseException as e:
               category = "SMTP_RESPONSE_ERROR"
               smtp_code = getattr(e, "smtp_code", None)
@@ -260,20 +336,46 @@ jobs:
 
           overall = "PASS" if all(v == "PASS" for v in steps.values()) else "FAIL"
 
+          # 발송 여부를 한 줄로 못박는다. 단계 표를 읽지 않아도 구분되게 한다.
+          DELIVERY_TEXT = {
+              "MAIL_SENT_1": (
+                  "**메일을 보냈다** — Gmail 이 테스트 메일 1통을 수락했다."
+              ),
+              "NOT_SENT_AUTH_FAILED": (
+                  "**메일을 보내지 않았다** — 인증(AUTH) 단계에서 중단됐다. "
+                  "send_message() 는 호출되지 않았다."
+              ),
+              "NOT_SENT_CONNECT_FAILED": (
+                  "**메일을 보내지 않았다** — 연결·TLS 단계에서 중단됐다. "
+                  "인증과 발송 모두 시도되지 않았다."
+              ),
+              "NOT_SENT_PRECHECK_FAILED": (
+                  "**메일을 보내지 않았다** — Secret·수신자 사전 검증에서 중단됐다. "
+                  "서버에 연결하지 않았다."
+              ),
+              "NOT_SENT_RECIPIENT_REFUSED": (
+                  "**메일이 전달되지 않았다** — 인증은 성공했으나 수신자가 거부됐다."
+              ),
+          }
+
           lines = []
           lines.append("| 단계 | 결과 |")
           lines.append("|---|---|")
-          lines.append("| CONNECT (TCP+EHLO) | **%s** |" % steps["CONNECT"])
+          lines.append("| TCP (connect) | **%s** |" % steps["TCP"])
           lines.append("| TLS (STARTTLS+검증) | **%s** |" % steps["TLS"])
           lines.append("| AUTH | **%s** |" % steps["AUTH"])
           lines.append("| SEND (1통) | **%s** |" % steps["SEND"])
           lines.append("| **Overall** | **%s** |" % overall)
 
           diag = []
+          diag.append(
+              "- 발송 결과: %s"
+              % DELIVERY_TEXT.get(delivery_state, "상태 불명 — 발송하지 않은 것으로 간주한다.")
+          )
+          diag.append("- delivery_state: `%s`" % delivery_state)
           diag.append("- 발신: `%s` (마스킹)" % mask_email(user))
           diag.append("- 수신: `%s` (마스킹)" % mask_email(rcpt))
           diag.append("- 제목: `%s`" % SUBJECT)
-          diag.append("- send_message() 호출: **1회** (재시도 없음)")
           if tls_proto:
               diag.append("- TLS: %s" % tls_proto)
           if category:
@@ -282,12 +384,19 @@ jobs:
               diag.append("- SMTP response code: `%s`" % smtp_code)
           if smtp_detail is not None:
               diag.append("- Sanitized SMTP response message: `%s`" % smtp_detail)
+          if auth_fail_reason:
+              diag.append("- **AUTH_FAIL_REASON: `%s`**" % auth_fail_reason)
           for n in notes:
               diag.append("- NOTE: %s" % n)
-          if overall == "PASS":
+          if delivery_state == "MAIL_SENT_1":
               diag.append(
-                  "- Gmail 이 메시지를 **수락**했다 (거부된 수신자 0건). "
-                  "실제 수신함 도달은 사용자가 직접 확인한다."
+                  "- 실제 수신함 도달은 사용자가 직접 확인한다 "
+                  "(Gmail 수락 ≠ 수신함 도달)."
+              )
+          else:
+              diag.append(
+                  "- **이 실행에서 발송된 메일은 0통이다.** "
+                  "Weekly Brief 도 생성되지 않았다."
               )
 
           body = "\n".join(lines) + "\n\n" + "\n".join(diag) + "\n"
@@ -298,7 +407,10 @@ jobs:
               with open(summary, "a", encoding="utf-8") as fh:
                   fh.write("## GA-2C SMTP Send Test\n\n")
                   fh.write(body)
-                  fh.write("\n> 이 실행은 **테스트 메일 1통만** 보냈다. ")
+                  if delivery_state == "MAIL_SENT_1":
+                      fh.write("\n> 이 실행은 **테스트 메일 1통만** 보냈다. ")
+                  else:
+                      fh.write("\n> 이 실행은 **메일을 보내지 않았다**. ")
                   fh.write("Weekly Brief 는 생성되지 않았고 Gemini 는 호출되지 않았다.\n")
 
           raise SystemExit(0 if overall == "PASS" else 1)
@@ -321,6 +433,47 @@ jobs:
             echo "::error::sendmail() 이 발견되었다. send_message() 1회만 허용한다."
             exit 1
           fi
+
+          echo "FAIL CLOSED 검사 (AUTH 게이트가 발송보다 앞에 있어야 한다):"
+          GATE_LN=$(grep -nE '^[^#]*if steps\["AUTH"\] != "PASS":' "$SCRIPT" | head -1 | cut -d: -f1)
+          SEND_LN=$(grep -nE '^[^#]*\.send_message[[:space:]]*\(' "$SCRIPT" | head -1 | cut -d: -f1)
+          echo "  AUTH 게이트 줄: ${GATE_LN:-없음} / send_message 줄: ${SEND_LN:-없음}"
+          if [ -z "${GATE_LN}" ] || [ -z "${SEND_LN}" ]; then
+            echo "::error::AUTH 게이트 또는 발송 호출을 찾지 못했다. 실행을 중단한다."
+            exit 1
+          fi
+          if [ "${GATE_LN}" -ge "${SEND_LN}" ]; then
+            echo "::error::AUTH 게이트가 발송보다 뒤에 있다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 게이트가 발송보다 앞에 있다. OK"
+
+          echo "GA-2B 재사용 블록 동일성 검사:"
+          for PAT in \
+            'HOST = "smtp.gmail.com"' \
+            'PORT = 587' \
+            'TIMEOUT = 30' \
+            'socket.create_connection((HOST, PORT), timeout=TIMEOUT)' \
+            'smtplib.SMTP(HOST, PORT, timeout=TIMEOUT)' \
+            'ssl.create_default_context()' \
+            'smtp.starttls(context=ctx)' \
+            'smtp.login(user, pw)' ; do
+            if ! grep -qF "$PAT" "$SCRIPT"; then
+              echo "::error::GA-2B PASS 코드의 필수 구문이 없다: ${PAT}"
+              exit 1
+            fi
+          done
+          echo "  -> 8개 구문 전부 존재. GA-2B 와 동일 구조 확인."
+
+          echo "EHLO 순서 검사 (ehlo -> starttls -> ehlo -> login):"
+          ORDER=$(grep -nE '^[^#]*(\.ehlo\(|\.starttls\(|\.login\()' "$SCRIPT" \
+                  | sed -E 's/.*\.(ehlo|starttls|login).*/\1/' | tr '\n' ' ')
+          echo "  관측 순서: ${ORDER}"
+          if [ "${ORDER}" != "ehlo starttls ehlo login " ]; then
+            echo "::error::SMTP 절차 순서가 GA-2B 와 다르다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 순서 일치. OK"
 
           echo "반복 발송 구조 검사:"
           if grep -nE '^[^#]*(for|while)[^#]*send_message' "$SCRIPT"; then
