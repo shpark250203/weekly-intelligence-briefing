@@ -518,10 +518,31 @@ AUTH PASS가 2회 재현된 값이므로, 실패 시에는 **회차 단위 거�
 | 인증 경로 | GA-2B PASS 코드와 동일 (SMTP 명령·인자·순서 일치) |
 | FAIL CLOSED | AUTH PASS가 아니면 `send_message()` 미호출 |
 | 미포함 | Weekly Brief 생성 · Gemini 호출 · `schedule` · `CLOUD_MODE` |
-| 상태 | **실행 대기 — 사용자가 GitHub Actions에서 수동 실행** |
+| 상태 | ~~실행 대기~~ → **완료 2026-10-01 (아래)** |
 
-실행 후 기록할 항목: `delivery_state`, 단계 표(TCP/TLS/AUTH/SEND), 수신함 도달 여부,
-그리고 `send_ledger.csv`에 `Status=TEST` 1행(§4-3 — 중복 판정 대상 아님).
+#### GA-2C 최종 결과 (2026-10-01) — **PASS, 1통 발송·수신 확인**
+
+| 단계 | 결과 |
+|---|---|
+| TCP | **PASS** |
+| TLS | **PASS** |
+| AUTH | **PASS** |
+| SEND | **PASS** |
+| **Overall** | **PASS** |
+
+- `delivery_state`: 발송 완료 (스크립트 출력값 `MAIL_SENT_1`)
+- 수신함 실제 도달: **확인됨 (사용자 직접 확인)**
+- 제목: `[TEST] Weekly Intelligence Briefing SMTP`
+- 발송 통수: **1통** — `send_message()` 1회, 재시도 없음
+- Weekly Brief 미생성 · Gemini 미호출 · `schedule` 미활성 · `CLOUD_MODE` 미설정
+- 원장 기록: `send_ledger.csv` `2026-W40 / LOCAL / TEST` 1행 (§4-3 — 중복 판정 대상 아님)
+
+**판정: GitHub Actions → Gmail SMTP 실제 발송 경로가 End-to-End로 검증되었다.**
+1차 FAIL(`SERVER_DISCONNECTED`) 원인은 구현이 아니었고,
+인증 경로를 GA-2B PASS 코드와 동일하게 정렬한 뒤 통과했다.
+**Secret은 변경하지 않았다** — GA-2B에서 2회 재현된 값 그대로다.
+
+**이로써 §3(SMTP 발송 설계)의 검증은 완료되었다.** 남은 미검증은 AI 엔진(§1·§2) 쪽이다.
 
 ## 3-3. Secret 구성
 
@@ -677,8 +698,8 @@ STEP 5  발송 :  gmail_send.py         — STEP 4가 ALL PASS일 때만 if: 조
 | ~~9~~ | ~~**App Password 생성** (`WIB GitHub Actions`) → **즉시** GitHub Secret 3건 등록: `GMAIL_USERNAME` · `GMAIL_APP_PASSWORD` · `WIB_RECIPIENT`~~ | **완료 2026-10-01** — GA-2B AUTH PASS로 `GMAIL_USERNAME`·`GMAIL_APP_PASSWORD` 유효성 실증 |
 | ~~10~~ | ~~SMTP 연결성 프로브 — TCP+EHLO만~~ | **완료 2026-09-30** — 465·587 모두 EHLO 250 + AUTH 광고 확인. **egress 열림** (§3-2) |
 | ~~11~~ | ~~**GA-2B SMTP AUTH 프로브** — 587/STARTTLS + TLS 실검증 + `login()` + NOOP + QUIT. **발송 없음**~~ | **완료 2026-10-01 — Overall PASS 2회 재현** (§3-2). 메일 미발송. **인증 경로 정상 확정, Secret 동결** |
-| **11-C** | **GA-2C 발송 테스트** — `[TEST]` 메일 **1통**만 `WIB_RECIPIENT`로 발송. Brief·Gemini·schedule·`CLOUD_MODE` 없음 | **workflow 준비 완료 (`3e43ed4`) / 1차 FAIL 후 인증경로 정렬 완료 / 재실행 대기 — 사용자 수동** |
-| **12** | Gemini 최소 호출 200 확인 (Brief 생성 없이) | 대기 |
+| ~~11-C~~ | ~~**GA-2C 발송 테스트** — `[TEST]` 메일 **1통**만 `WIB_RECIPIENT`로 발송~~ | **완료 2026-10-01 — Overall PASS. 1통 발송·수신 확인** (§3-2). 원장 `2026-W40/TEST` 기록 |
+| **12** | Gemini 최소 호출 200 확인 (Brief 생성 없이) | **대기 — GA-2 의 마지막 미완 단계. GA-3 의 선행 조건** |
 
 STEP 12까지 끝나면 GA-2 완료다.
 **STEP 11-C에서만 메일 1통이 나가고, 그 외 어떤 단계에서도 Brief는 생성되지 않고 메일은 나가지 않는다.**
