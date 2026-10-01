@@ -477,6 +477,52 @@ GA-2C의 CONNECT/TLS/AUTH 블록을 **GA-2B PASS 코드와 동일하게 복원**
 **원인은 구현이 아니라 계정·IP 쪽**임이 확정된다.
 App Password 재발급·발송 방식 변경은 **하지 않았다.**
 
+#### GA-2B 재확인 (2026-10-01, 정렬 수정 이후) — 다시 Overall PASS
+
+| 단계 | 결과 |
+|---|---|
+| TCP | **PASS** |
+| TLS | **PASS** |
+| AUTH | **PASS** |
+| NOOP | **PASS** |
+| **Overall** | **PASS** |
+
+**판정: Gmail SMTP 인증 경로를 정상으로 확정한다.**
+
+이로써 같은 Secret으로 **AUTH PASS가 2회 재현**되었다(최초 + 재확인).
+중간의 534 1회와 GA-2C의 `SERVER_DISCONNECTED` 1회는
+**자격증명 결함이 아니라 회차 단위의 일시적 거부**였다는 해석과 일치한다.
+
+#### Secret 변경 동결 (2026-10-01)
+
+| Secret | 상태 |
+|---|---|
+| `GMAIL_USERNAME` | **확정 — 더 이상 수정하지 않는다** |
+| `GMAIL_APP_PASSWORD` | **확정 — 재발급·수정하지 않는다** |
+
+이후 단계에서 SMTP 인증이 실패하더라도 **이 두 Secret을 먼저 의심하지 않는다.**
+AUTH PASS가 2회 재현된 값이므로, 실패 시에는 **회차 단위 거부 또는 구현 차이**를
+먼저 확인한다(진단 순서: GA-2B 재실행 → 구현 diff → 계정·IP).
+
+#### GA-2C 실행 대기 상태 (2026-10-01 기준)
+
+| 항목 | 값 |
+|---|---|
+| workflow | `GA-2C SMTP Send Test` (기존 파일 재사용, 신규 생성 없음) |
+| 파일 | `.github/workflows/smtp-send-test.yml` |
+| 기준 커밋 | `3e43ed4` |
+| 트리거 | `workflow_dispatch` 전용 — `schedule` 0건 |
+| 실행 조건 | `confirm` 입력이 정확히 `SEND` |
+| 주입 Secret | `GMAIL_USERNAME` · `GMAIL_APP_PASSWORD` · `WIB_RECIPIENT` (발송 스텝 `env` 한정) |
+| 발송 호출 | `send_message()` **1회** — Guard가 개수로 검증 |
+| 인증 경로 | GA-2B PASS 코드와 동일 (SMTP 명령·인자·순서 일치) |
+| FAIL CLOSED | AUTH PASS가 아니면 `send_message()` 미호출 |
+| 미포함 | Weekly Brief 생성 · Gemini 호출 · `schedule` · `CLOUD_MODE` |
+| 상태 | **실행 대기 — 사용자가 GitHub Actions에서 수동 실행** |
+
+실행 후 기록할 항목: `delivery_state`, 단계 표(TCP/TLS/AUTH/SEND), 수신함 도달 여부,
+그리고 `send_ledger.csv`에 `Status=TEST` 1행(§4-3 — 중복 판정 대상 아님).
+
 ## 3-3. Secret 구성
 
 | Secret | 용도 | 상태 |
@@ -630,8 +676,8 @@ STEP 5  발송 :  gmail_send.py         — STEP 4가 ALL PASS일 때만 if: 조
 | **8** | **2단계 인증(2SV) 활성 확인** | **완료 2026-09-30 — ON** |
 | ~~9~~ | ~~**App Password 생성** (`WIB GitHub Actions`) → **즉시** GitHub Secret 3건 등록: `GMAIL_USERNAME` · `GMAIL_APP_PASSWORD` · `WIB_RECIPIENT`~~ | **완료 2026-10-01** — GA-2B AUTH PASS로 `GMAIL_USERNAME`·`GMAIL_APP_PASSWORD` 유효성 실증 |
 | ~~10~~ | ~~SMTP 연결성 프로브 — TCP+EHLO만~~ | **완료 2026-09-30** — 465·587 모두 EHLO 250 + AUTH 광고 확인. **egress 열림** (§3-2) |
-| ~~11~~ | ~~**GA-2B SMTP AUTH 프로브** — 587/STARTTLS + TLS 실검증 + `login()` + NOOP + QUIT. **발송 없음**~~ | **완료 2026-10-01 — Overall PASS** (§3-2). 메일 미발송 |
-| **11-C** | **GA-2C 발송 테스트** — `[TEST]` 메일 **1통**만 `WIB_RECIPIENT`로 발송. Brief·Gemini·schedule·`CLOUD_MODE` 없음 | **workflow 생성 완료 2026-10-01 / 실행 대기 (사용자 수동)** |
+| ~~11~~ | ~~**GA-2B SMTP AUTH 프로브** — 587/STARTTLS + TLS 실검증 + `login()` + NOOP + QUIT. **발송 없음**~~ | **완료 2026-10-01 — Overall PASS 2회 재현** (§3-2). 메일 미발송. **인증 경로 정상 확정, Secret 동결** |
+| **11-C** | **GA-2C 발송 테스트** — `[TEST]` 메일 **1통**만 `WIB_RECIPIENT`로 발송. Brief·Gemini·schedule·`CLOUD_MODE` 없음 | **workflow 준비 완료 (`3e43ed4`) / 1차 FAIL 후 인증경로 정렬 완료 / 재실행 대기 — 사용자 수동** |
 | **12** | Gemini 최소 호출 200 확인 (Brief 생성 없이) | 대기 |
 
 STEP 12까지 끝나면 GA-2 완료다.
