@@ -16,7 +16,12 @@
 #   - 저장소 쓰기 (permissions: contents: read, checkout 하지 않음)
 #
 # 출력: TCP / TLS / AUTH / NOOP / Overall 의 PASS·FAIL 과
-#       실패 시 SMTP status code · 오류 category 뿐이다.
+#       실패 시 아래 뿐이다.
+#         - SMTP response code
+#         - Sanitized SMTP response message (자격증명·메일주소 제거 후)
+#         - AUTH_FAIL_REASON
+#           APP_PASSWORD_REQUIRED / BAD_CREDENTIALS / BROWSER_LOGIN_REQUIRED
+#           / ACCOUNT_POLICY / SERVER_DISCONNECTED / UNKNOWN
 
 name: GA-2B SMTP AUTH Probe
 
@@ -44,6 +49,7 @@ jobs:
           cat > "${RUNNER_TEMP}/ga2b/auth_probe.py" <<'PYEOF'
           # GA-2B SMTP AUTH Probe — 인증까지만 확인한다. 메일을 보내지 않는다.
           import os
+          import re
           import smtplib
           import socket
           import ssl
@@ -55,6 +61,8 @@ jobs:
           steps = {"TCP": "FAIL", "TLS": "FAIL", "AUTH": "FAIL", "NOOP": "FAIL"}
           category = None
           smtp_code = None
+          auth_response = None
+          auth_fail_reason = None
           notes = []
           tls_proto = None
           tls_cipher = None
@@ -77,15 +85,81 @@ jobs:
           pw_raw = os.environ.get("GMAIL_APP_PASSWORD", "")
 
           user = user_raw.strip()
-          pw = pw_raw.replace(" ", "").strip()
+          # 앞뒤 여백 + 내부 공백(스페이스·탭·개행)을 모두 제거한다.
+          # 제거 사실만 NOTE로 남기고, 값도 길이도 출력하지 않는다.
+          pw = "".join(pw_raw.split())
 
           if pw_raw != pw:
               notes.append(
                   "App Password에 공백·여백이 포함되어 있어 제거 후 인증했다. "
-                  "Secret을 공백 없는 16자로 다시 저장할 것을 권고한다."
+                  "Secret을 공백 없이 다시 저장할 것을 권고한다. (값·길이 미출력)"
               )
           if user_raw != user:
               notes.append("GMAIL_USERNAME에 여백이 포함되어 있어 제거 후 인증했다.")
+
+
+          def sanitize_smtp_message(raw):
+              """Google 응답 문구에서 자격증명·메일주소를 제거한 형태만 남긴다.
+
+              - Secret 값이 응답에 섞여 들어오는 경우까지 방어적으로 치환한다.
+              - 메일주소는 전체를 남기지 않는다.
+              - 길이 정보를 노출하지 않기 위해 300자에서 자른다(고정 상한).
+              """
+              if raw is None:
+                  return None
+              if isinstance(raw, (bytes, bytearray)):
+                  text = bytes(raw).decode("utf-8", "replace")
+              else:
+                  text = str(raw)
+              text = " ".join(text.split())
+              for secret in (pw, pw_raw, user, user_raw):
+                  if secret and len(secret) >= 4:
+                      text = text.replace(secret, "[REDACTED]")
+              text = re.sub(
+                  r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+", "[REDACTED-EMAIL]", text
+              )
+              if len(text) > 300:
+                  text = text[:300] + " ...(truncated)"
+              return text
+
+
+          def classify_auth_failure(code, text):
+              """SMTP 인증 실패를 미리 정의된 사유 하나로만 환원한다.
+
+              Gmail은 같은 534에 서로 다른 조치를 요구하는 세부코드를 붙인다.
+                534-5.7.9  → App Password 가 아닌 자격증명을 보냈다
+                534-5.7.14 → 브라우저 로그인(기기 확인)이 필요하다
+              코드만으로는 이 둘이 구분되지 않으므로 문구를 먼저 본다.
+              """
+              t = (text or "").lower()
+              if "application-specific password" in t or "5.7.9" in t:
+                  return "APP_PASSWORD_REQUIRED"
+              if (
+                  "web browser" in t
+                  or "5.7.14" in t
+                  or "websignin" in t
+                  or "signin/continue" in t
+              ):
+                  return "BROWSER_LOGIN_REQUIRED"
+              if (
+                  "username and password not accepted" in t
+                  or "badcredentials" in t
+                  or "5.7.8" in t
+              ):
+                  return "BAD_CREDENTIALS"
+              if (
+                  "disabled" in t
+                  or "suspended" in t
+                  or "not enabled" in t
+                  or "administrator" in t
+                  or "policy" in t
+                  or "not allowed" in t
+              ):
+                  return "ACCOUNT_POLICY"
+              if code == 535:
+                  return "BAD_CREDENTIALS"
+              # 534 인데 세부코드가 안 잡히면 추측하지 않는다.
+              return "UNKNOWN"
 
           smtp = None
           try:
@@ -148,13 +222,19 @@ jobs:
           except ssl.SSLError:
               category = "TLS_HANDSHAKE_ERROR"
           except smtplib.SMTPAuthenticationError as e:
-              # 메시지 본문을 출력하지 않는다. 상태 코드만 기록한다.
+              # 인증 거부는 별도로 받는다. 원문 대신 **정제된 문구**만 기록한다.
+              # 정제 후에도 자격증명이 남지 않는다 (sanitize_smtp_message 참조).
               category = "AUTH_REJECTED"
               smtp_code = getattr(e, "smtp_code", None)
+              auth_response = sanitize_smtp_message(getattr(e, "smtp_error", None))
+              auth_fail_reason = classify_auth_failure(smtp_code, auth_response)
           except smtplib.SMTPNotSupportedError:
               category = "STARTTLS_NOT_SUPPORTED"
           except smtplib.SMTPServerDisconnected:
               category = "SERVER_DISCONNECTED"
+              # TLS 이후 끊겼다면 인증 단계에서의 절단이다.
+              if steps["TLS"] == "PASS" and steps["AUTH"] == "FAIL":
+                  auth_fail_reason = "SERVER_DISCONNECTED"
           except smtplib.SMTPResponseException as e:
               category = "SMTP_RESPONSE_ERROR"
               smtp_code = getattr(e, "smtp_code", None)
@@ -190,7 +270,13 @@ jobs:
           if category:
               diag.append("- 오류 category: `%s`" % category)
           if smtp_code is not None:
-              diag.append("- SMTP status code: `%s`" % smtp_code)
+              diag.append("- SMTP response code: `%s`" % smtp_code)
+          if auth_response is not None:
+              diag.append(
+                  "- Sanitized SMTP response message: `%s`" % auth_response
+              )
+          if auth_fail_reason:
+              diag.append("- **AUTH_FAIL_REASON: `%s`**" % auth_fail_reason)
           for n in notes:
               diag.append("- NOTE: %s" % n)
           diag.append("- 발송 API 호출: **없음** (메일 전송 명령을 사용하지 않았다)")
@@ -226,6 +312,23 @@ jobs:
             exit 1
           fi
           echo "  -> 0건. 인증서 검증 유지 확인."
+          echo "Secret 길이·값 출력 검사:"
+          if grep -nE '^[^#]*len\([[:space:]]*(pw|pw_raw|user|user_raw)[[:space:]]*\)' "$SCRIPT" \
+             | grep -vE 'len\((pw|pw_raw|user|user_raw)\)[[:space:]]*>=[[:space:]]*4'; then
+            echo "::error::Secret 길이를 노출할 수 있는 코드가 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          if grep -nE '^[^#]*(print|append|write)\(.*(\bpw\b|pw_raw)' "$SCRIPT"; then
+            echo "::error::App Password 를 출력하는 코드가 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건. 값·길이 미출력 확인."
+          echo "debuglevel 검사:"
+          if grep -nE '^[^#]*set_debuglevel' "$SCRIPT"; then
+            echo "::error::set_debuglevel 은 자격증명을 로그에 출력한다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건."
 
       - name: Run SMTP AUTH probe
         env:
