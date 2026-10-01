@@ -1,0 +1,381 @@
+# GA-2C — SMTP 발송 테스트 (실제 메일 1통)
+#
+# 목적: GitHub Actions 러너에서 Gmail SMTP로 `WIB_RECIPIENT` 에게
+#       **테스트 메일 1통이 실제로 도달하는지** 확인한다.
+#       GA-2B(smtp-auth-probe.yml)는 AUTH까지만 확인했고 발송은 하지 않았다.
+#
+# 선행 조건: GA-2B Overall PASS (2026-10-01) — ga2_auth_design.md §3-2
+#
+# 이 workflow 가 하는 것 (이게 전부다):
+#   1 TCP+EHLO  2 STARTTLS  3 TLS 인증서 검증  4 EHLO  5 LOGIN
+#   6 send_message() 1회  7 QUIT
+#
+# 절대 하지 않는 것:
+#   - Weekly Brief 생성 (수집·판단·조립 단계가 존재하지 않는다)
+#   - Gemini API 호출 (GEMINI_API_KEY 를 주입하지 않는다)
+#   - schedule 자동 실행 (workflow_dispatch 전용)
+#   - CLOUD_MODE 조회·활성화 (이 단계는 CLOUD MODE가 아니다)
+#   - 2통 이상 발송 (수신자 1명, send_message 호출 1회, 재시도 없음)
+#   - Secret 값 출력 / 수신 주소 전체 출력 / 본문 외 개인정보 출력
+#   - 저장소 쓰기 (permissions: contents: read, checkout 하지 않음)
+#
+# send_gate.md 와의 관계:
+#   §1-2 LOCAL MODE 가 허용하는 **수동 테스트 경로**다.
+#   "기존 수동 테스트 방식([TEST] 제목 접두 + 본인 수신)을 그대로 유지한다" 에 해당한다.
+#   G0(CLOUD_MODE)을 우회하는 것이 아니다 — G0 은 Weekly Brief 자동발송을 가두는 Gate이고,
+#   이 실행은 Brief 를 만들지 않으며 사용자가 매번 손으로 눌러야 한다.
+#   원장 기록 시 Status=TEST 이며, §4-3 에 따라 **중복 판정 대상이 아니다.**
+#
+# 출력: 발송 단계별 PASS·FAIL 과 Gmail 수락 응답 여부뿐이다.
+#       수신 주소는 s***@도메인 형태로만 표시한다.
+
+name: GA-2C SMTP Send Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '실제 메일 1통을 발송한다. 진행하려면 SEND 를 정확히 입력하세요.'
+        required: true
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ga2c-smtp-send-test
+  cancel-in-progress: false
+
+jobs:
+  send-test:
+    name: Send one test email to WIB_RECIPIENT
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Gate — 발송 확인 입력 검증
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -uo pipefail
+          # 정확한 문자열 일치만 인정한다. 공백·대소문자 보정을 하지 않는다.
+          # (send_gate.md §0 FAIL CLOSED — 판단이 서지 않으면 보내지 않는다)
+          if [ "${CONFIRM}" != "SEND" ]; then
+            echo "::error::confirm 입력이 'SEND' 가 아니다. 발송하지 않고 중단한다."
+            exit 1
+          fi
+          echo "확인 입력 일치. 테스트 메일 1통 발송을 진행한다."
+
+      - name: Write send script
+        run: |
+          set -uo pipefail
+          mkdir -p "${RUNNER_TEMP}/ga2c"
+          cat > "${RUNNER_TEMP}/ga2c/send_test.py" <<'PYEOF'
+          # GA-2C SMTP 발송 테스트 — 테스트 메일 1통만 보낸다.
+          # Weekly Brief 를 만들지 않고, Gemini 를 호출하지 않는다.
+          import os
+          import re
+          import smtplib
+          import ssl
+          from email.message import EmailMessage
+
+          HOST = "smtp.gmail.com"
+          PORT = 587
+          TIMEOUT = 30
+
+          SUBJECT = "[TEST] Weekly Intelligence Briefing SMTP"
+          BODY = (
+              "Weekly Intelligence Briefing Gmail SMTP test succeeded.\n"
+              "\n"
+              "This is a one-time delivery test.\n"
+              "No Weekly Brief was generated.\n"
+          )
+
+          steps = {"CONNECT": "FAIL", "TLS": "FAIL", "AUTH": "FAIL", "SEND": "FAIL"}
+          category = None
+          smtp_code = None
+          smtp_detail = None
+          refused = None
+          notes = []
+          tls_proto = None
+
+
+          class ProbeStop(Exception):
+              pass
+
+
+          def mask_email(value):
+              """s***@gmail.com 형태로만 남긴다. 전체 주소를 출력하지 않는다."""
+              if not value or "@" not in value:
+                  return "(형식 확인 불가)"
+              local, _, domain = value.partition("@")
+              head = local[0] if local else "?"
+              return head + "***@" + domain
+
+
+          user_raw = os.environ.get("GMAIL_USERNAME", "")
+          pw_raw = os.environ.get("GMAIL_APP_PASSWORD", "")
+          rcpt_raw = os.environ.get("WIB_RECIPIENT", "")
+
+          user = user_raw.strip()
+          rcpt = rcpt_raw.strip()
+          # 앞뒤 여백 + 내부 공백(스페이스·탭·개행) 모두 제거. 값·길이 미출력.
+          pw = "".join(pw_raw.split())
+
+          if pw_raw != pw:
+              notes.append(
+                  "App Password 에 공백·여백이 포함되어 있어 제거 후 인증했다. "
+                  "Secret 을 공백 없이 다시 저장할 것을 권고한다. (값·길이 미출력)"
+              )
+
+          ADDR_RE = re.compile(r"^[^@\s,;]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+          def sanitize(raw):
+              """응답 문구에서 자격증명·메일주소를 제거한 형태만 남긴다."""
+              if raw is None:
+                  return None
+              if isinstance(raw, (bytes, bytearray)):
+                  text = bytes(raw).decode("utf-8", "replace")
+              else:
+                  text = str(raw)
+              text = " ".join(text.split())
+              for secret in (pw, pw_raw, user, user_raw, rcpt, rcpt_raw):
+                  if secret and len(secret) >= 4:
+                      text = text.replace(secret, "[REDACTED]")
+              text = re.sub(
+                  r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+", "[REDACTED-EMAIL]", text
+              )
+              if len(text) > 300:
+                  text = text[:300] + " ...(truncated)"
+              return text
+
+
+          smtp = None
+          try:
+              # Secret 존재 확인 — 없으면 네트워크에 닿기 전에 멈춘다.
+              if not user or not pw:
+                  category = "SECRET_MISSING_GMAIL"
+                  raise ProbeStop()
+              if not rcpt:
+                  # send_gate.md G4 에 대응한다.
+                  category = "SECRET_MISSING_RECIPIENT"
+                  raise ProbeStop()
+              # 수신자는 **단일 주소**여야 한다. 쉼표가 있으면 다중 발송 위험이므로 멈춘다.
+              if ("," in rcpt_raw) or (";" in rcpt_raw) or not ADDR_RE.match(rcpt):
+                  category = "RECIPIENT_FORMAT_INVALID"
+                  raise ProbeStop()
+
+              # 1) 연결 + EHLO  (생성자가 TCP 연결과 220 그리팅을 함께 수행한다)
+              smtp = smtplib.SMTP(HOST, PORT, timeout=TIMEOUT)
+              code, _ = smtp.ehlo()
+              if code != 250:
+                  category = "EHLO_UNEXPECTED"
+                  smtp_code = code
+                  raise ProbeStop()
+              steps["CONNECT"] = "PASS"
+
+              # 2) STARTTLS + 3) 인증서 검증
+              #    create_default_context() 는 check_hostname=True,
+              #    verify_mode=CERT_REQUIRED 다. 이 값을 낮추지 않는다.
+              ctx = ssl.create_default_context()
+              if not ctx.check_hostname or ctx.verify_mode != ssl.CERT_REQUIRED:
+                  category = "TLS_CONTEXT_WEAKENED"
+                  raise ProbeStop()
+              smtp.starttls(context=ctx)
+              steps["TLS"] = "PASS"
+              try:
+                  tls_proto = smtp.sock.version()
+              except Exception:
+                  pass
+
+              # 4) EHLO again
+              code, _ = smtp.ehlo()
+              if code != 250:
+                  category = "EHLO2_UNEXPECTED"
+                  smtp_code = code
+                  raise ProbeStop()
+
+              # 5) LOGIN
+              smtp.login(user, pw)
+              steps["AUTH"] = "PASS"
+
+              # 6) 발송 — 단 1통. 수신자 1명. 재시도 없음.
+              msg = EmailMessage()
+              msg["From"] = user
+              msg["To"] = rcpt
+              msg["Subject"] = SUBJECT
+              msg.set_content(BODY, charset="utf-8")
+
+              refused = smtp.send_message(msg)
+              if refused:
+                  # 일부 수신자 거부 — 주소를 출력하지 않고 건수만 기록한다.
+                  category = "RECIPIENT_REFUSED"
+                  notes.append("거부된 수신자 수: %d" % len(refused))
+              else:
+                  steps["SEND"] = "PASS"
+
+          except ProbeStop:
+              pass
+          except ssl.SSLCertVerificationError:
+              category = "TLS_CERT_VERIFY_FAILED"
+          except ssl.SSLError:
+              category = "TLS_HANDSHAKE_ERROR"
+          except smtplib.SMTPAuthenticationError as e:
+              category = "AUTH_REJECTED"
+              smtp_code = getattr(e, "smtp_code", None)
+              smtp_detail = sanitize(getattr(e, "smtp_error", None))
+          except smtplib.SMTPRecipientsRefused as e:
+              category = "RECIPIENTS_REFUSED_ALL"
+              try:
+                  smtp_code = list(e.recipients.values())[0][0]
+              except Exception:
+                  pass
+          except smtplib.SMTPSenderRefused as e:
+              category = "SENDER_REFUSED"
+              smtp_code = getattr(e, "smtp_code", None)
+          except smtplib.SMTPDataError as e:
+              category = "DATA_REJECTED"
+              smtp_code = getattr(e, "smtp_code", None)
+              smtp_detail = sanitize(getattr(e, "smtp_error", None))
+          except smtplib.SMTPNotSupportedError:
+              category = "STARTTLS_NOT_SUPPORTED"
+          except smtplib.SMTPServerDisconnected:
+              category = "SERVER_DISCONNECTED"
+          except smtplib.SMTPResponseException as e:
+              category = "SMTP_RESPONSE_ERROR"
+              smtp_code = getattr(e, "smtp_code", None)
+              smtp_detail = sanitize(getattr(e, "smtp_error", None))
+          except smtplib.SMTPException as e:
+              category = "SMTP_ERROR_" + type(e).__name__
+          except OSError as e:
+              category = "SOCKET_ERROR_" + type(e).__name__
+          finally:
+              # 7) QUIT
+              if smtp is not None:
+                  try:
+                      smtp.quit()
+                  except Exception:
+                      pass
+
+          overall = "PASS" if all(v == "PASS" for v in steps.values()) else "FAIL"
+
+          lines = []
+          lines.append("| 단계 | 결과 |")
+          lines.append("|---|---|")
+          lines.append("| CONNECT (TCP+EHLO) | **%s** |" % steps["CONNECT"])
+          lines.append("| TLS (STARTTLS+검증) | **%s** |" % steps["TLS"])
+          lines.append("| AUTH | **%s** |" % steps["AUTH"])
+          lines.append("| SEND (1통) | **%s** |" % steps["SEND"])
+          lines.append("| **Overall** | **%s** |" % overall)
+
+          diag = []
+          diag.append("- 발신: `%s` (마스킹)" % mask_email(user))
+          diag.append("- 수신: `%s` (마스킹)" % mask_email(rcpt))
+          diag.append("- 제목: `%s`" % SUBJECT)
+          diag.append("- send_message() 호출: **1회** (재시도 없음)")
+          if tls_proto:
+              diag.append("- TLS: %s" % tls_proto)
+          if category:
+              diag.append("- 오류 category: `%s`" % category)
+          if smtp_code is not None:
+              diag.append("- SMTP response code: `%s`" % smtp_code)
+          if smtp_detail is not None:
+              diag.append("- Sanitized SMTP response message: `%s`" % smtp_detail)
+          for n in notes:
+              diag.append("- NOTE: %s" % n)
+          if overall == "PASS":
+              diag.append(
+                  "- Gmail 이 메시지를 **수락**했다 (거부된 수신자 0건). "
+                  "실제 수신함 도달은 사용자가 직접 확인한다."
+              )
+
+          body = "\n".join(lines) + "\n\n" + "\n".join(diag) + "\n"
+
+          print(body)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("## GA-2C SMTP Send Test\n\n")
+                  fh.write(body)
+                  fh.write("\n> 이 실행은 **테스트 메일 1통만** 보냈다. ")
+                  fh.write("Weekly Brief 는 생성되지 않았고 Gemini 는 호출되지 않았다.\n")
+
+          raise SystemExit(0 if overall == "PASS" else 1)
+          PYEOF
+          echo "send script written."
+
+      - name: Guard — 1통 발송 범위를 벗어나지 않는지 정적 검사
+        run: |
+          set -uo pipefail
+          SCRIPT="${RUNNER_TEMP}/ga2c/send_test.py"
+
+          echo "발송 호출 횟수 검사 (정확히 1회여야 한다):"
+          N=$(grep -cE '^[^#]*\.send_message[[:space:]]*\(' "$SCRIPT" || true)
+          echo "  send_message( 호출: ${N}건"
+          if [ "$N" -ne 1 ]; then
+            echo "::error::send_message 호출이 1회가 아니다 (${N}건). 실행을 중단한다."
+            exit 1
+          fi
+          if grep -nE '^[^#]*\.sendmail[[:space:]]*\(' "$SCRIPT"; then
+            echo "::error::sendmail() 이 발견되었다. send_message() 1회만 허용한다."
+            exit 1
+          fi
+
+          echo "반복 발송 구조 검사:"
+          if grep -nE '^[^#]*(for|while)[^#]*send_message' "$SCRIPT"; then
+            echo "::error::루프 안에서 발송하는 코드가 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건."
+
+          echo "TLS 검증 무력화 검사:"
+          if grep -nE '^[^#]*(CERT_NONE|check_hostname\s*=\s*False|_create_unverified)' "$SCRIPT"; then
+            echo "::error::TLS 검증을 낮추는 코드가 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건. 인증서 검증 유지 확인."
+
+          echo "Secret 값·길이 출력 검사:"
+          if grep -nE '^[^#]*len\([[:space:]]*(pw|pw_raw|user|user_raw|rcpt|rcpt_raw)[[:space:]]*\)' "$SCRIPT" \
+             | grep -vE 'len\((pw|pw_raw|user|user_raw|rcpt|rcpt_raw)\)[[:space:]]*>=[[:space:]]*4'; then
+            echo "::error::Secret 길이를 노출할 수 있는 코드가 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          if grep -nE '^[^#]*(print|append|write)\(.*(\bpw\b|pw_raw)' "$SCRIPT"; then
+            echo "::error::App Password 를 출력하는 코드가 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건."
+
+          echo "수신 주소 평문 출력 검사 (mask_email 경유만 허용):"
+          if grep -nE '^[^#]*(print|append|write)\(.*(\brcpt\b|rcpt_raw)' "$SCRIPT" \
+             | grep -vE 'mask_email'; then
+            echo "::error::수신 주소를 마스킹 없이 출력하는 코드가 발견되었다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건. 마스킹 경유만 확인."
+
+          echo "debuglevel 검사:"
+          if grep -nE '^[^#]*set_debuglevel' "$SCRIPT"; then
+            echo "::error::set_debuglevel 은 자격증명을 로그에 출력한다. 실행을 중단한다."
+            exit 1
+          fi
+          echo "  -> 0건."
+
+          echo "AI 호출 부재 검사 (주석·안내문구가 아닌 실제 호출·키 사용만):"
+          if grep -nE '^[^#]*(generativelanguage|GEMINI_API_KEY|ANTHROPIC_API_KEY|import[[:space:]]+google|genai|urllib|requests|http\.client)' "$SCRIPT"; then
+            echo "::error::AI 호출·외부 HTTP 흔적이 발견되었다. GA-2C 는 SMTP 외 통신을 하지 않는다."
+            exit 1
+          fi
+          echo "  -> 0건. SMTP 외 통신 경로 없음 확인."
+
+      - name: Send one test email
+        env:
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          WIB_RECIPIENT: ${{ secrets.WIB_RECIPIENT }}
+        run: |
+          set -uo pipefail
+          python3 --version
+          python3 "${RUNNER_TEMP}/ga2c/send_test.py"

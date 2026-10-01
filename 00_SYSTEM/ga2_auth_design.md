@@ -394,14 +394,45 @@ GitHub Secrets에 OAuth 관련 값이 등록된 적도 없다. → **폐기해�
 `openssl s_client -quiet` 옵션이 `Verification: OK` 출력까지 억제해 파싱하지 못했다.
 TLS 핸드셰이크 자체는 성공했다(성공하지 않았다면 EHLO 응답을 받을 수 없다).
 
-### ⚠ 남은 미검증 — AUTH (GA-2B에서 확인)
+### SMTP AUTH 실측 — GA-2B Probe 결과 (2026-10-01) — **PASS**
 
-**인증까지 가능한지는 아직 확인되지 않았다.** 데이터센터 IP에서의 Gmail 로그인 거부 가능성이 남아 있다.
+`.github/workflows/smtp-auth-probe.yml` 수동 실행 결과.
 
-→ `.github/workflows/smtp-auth-probe.yml` (**GA-2B**)로 확인한다.
-   587/STARTTLS + `ssl.create_default_context()` 실검증 + `login()` + `NOOP` + `QUIT`.
-   **`sendmail()`·`send_message()`를 호출하지 않으며, 실행 전 정적 검사로 그 부재를 재확인한다.**
-   이 프로브가 TLS 검증 UNKNOWN 항목도 함께 해소한다.
+| 단계 | 결과 |
+|---|---|
+| TCP | **PASS** |
+| TLS | **PASS** |
+| AUTH | **PASS** |
+| NOOP | **PASS** |
+| **Overall** | **PASS** |
+
+**판정: GitHub Actions 러너에서 Gmail SMTP 인증이 가능하다.**
+587/STARTTLS + `ssl.create_default_context()` 실검증 + `login()` + `NOOP` + `QUIT`까지
+전 단계가 통과했다. **`sendmail()`·`send_message()`는 호출되지 않았다** — 메일은 나가지 않았다.
+
+**해소된 미검증 항목 2개:**
+
+| 항목 | 이전 상태 | GA-2B 결과 |
+|---|---|---|
+| 데이터센터 IP에서의 Gmail 로그인 거부 가능성 | 미검증 | **거부되지 않음 — AUTH PASS** |
+| GA-2의 `TLS 검증 = UNKNOWN` (프로브 결함) | 미해소 | **해소 — TLS PASS (인증서 실검증)** |
+
+**중간에 관측된 534 / `AUTH_REJECTED` 1회 (2026-10-01)**
+동일 프로브에서 TCP·TLS는 PASS, AUTH만 534로 거부된 회차가 선행했다.
+당시 프로브는 `smtp_code`만 남기고 응답 문구를 버려 `5.7.9`(App Password 아님)와
+`5.7.14`(브라우저 로그인 필요)를 구분할 수 없었다.
+→ 진단을 보완(`AUTH_FAIL_REASON` 분류 + 정제된 응답 문구)한 뒤 재실행해 PASS를 확인했다.
+**App Password 재발급·발송 방식 변경은 하지 않았다.**
+
+### ⚠ 남은 미검증 — 실제 발송 1통 (GA-2C에서 확인)
+
+**AUTH까지는 확인되었으나 `sendmail()`이 실제로 수신자에게 도달하는지는 미검증이다.**
+인증 성공은 발송 성공을 보장하지 않는다 — 수신 거부·스팸 분류·`WIB_RECIPIENT` 형식 오류가 남아 있다.
+
+→ `.github/workflows/smtp-send-test.yml` (**GA-2C**)로 확인한다.
+   `[TEST]` 제목 접두 + 고정 본문 + **1통만** 발송. `workflow_dispatch` 전용, `schedule` 없음.
+   Weekly Brief 생성·Gemini 호출·`CLOUD_MODE`는 이 단계에 포함되지 않는다.
+   이는 `send_gate.md` §1-2가 허용하는 **LOCAL MODE 수동 테스트 경로**다 (G0 우회가 아니다).
 
 ## 3-3. Secret 구성
 
@@ -554,12 +585,14 @@ STEP 5  발송 :  gmail_send.py         — STEP 4가 ALL PASS일 때만 if: 조
 | ~~6~~ | ~~로컬 동의 흐름 → refresh token 확보~~ | **DEPRECATED — 실행되지 않았다. 발급된 토큰 0건** |
 | ~~7~~ | ~~GitHub Secrets 3건 (OAuth)~~ | **DEPRECATED — 등록된 적 없음** |
 | **8** | **2단계 인증(2SV) 활성 확인** | **완료 2026-09-30 — ON** |
-| **9** | **App Password 생성** (`WIB GitHub Actions`) → **즉시** GitHub Secret 3건 등록: `GMAIL_USERNAME` · `GMAIL_APP_PASSWORD` · `WIB_RECIPIENT` | 진행 중 |
+| ~~9~~ | ~~**App Password 생성** (`WIB GitHub Actions`) → **즉시** GitHub Secret 3건 등록: `GMAIL_USERNAME` · `GMAIL_APP_PASSWORD` · `WIB_RECIPIENT`~~ | **완료 2026-10-01** — GA-2B AUTH PASS로 `GMAIL_USERNAME`·`GMAIL_APP_PASSWORD` 유효성 실증 |
 | ~~10~~ | ~~SMTP 연결성 프로브 — TCP+EHLO만~~ | **완료 2026-09-30** — 465·587 모두 EHLO 250 + AUTH 광고 확인. **egress 열림** (§3-2) |
-| **11** | **GA-2B SMTP AUTH 프로브** — 587/STARTTLS + TLS 실검증 + `login()` + NOOP + QUIT. **발송 없음** | 진행 중 |
+| ~~11~~ | ~~**GA-2B SMTP AUTH 프로브** — 587/STARTTLS + TLS 실검증 + `login()` + NOOP + QUIT. **발송 없음**~~ | **완료 2026-10-01 — Overall PASS** (§3-2). 메일 미발송 |
+| **11-C** | **GA-2C 발송 테스트** — `[TEST]` 메일 **1통**만 `WIB_RECIPIENT`로 발송. Brief·Gemini·schedule·`CLOUD_MODE` 없음 | **workflow 생성 완료 2026-10-01 / 실행 대기 (사용자 수동)** |
 | **12** | Gemini 최소 호출 200 확인 (Brief 생성 없이) | 대기 |
 
-STEP 12까지 끝나면 GA-2 완료다. **여기서도 Brief는 생성되지 않고 메일은 나가지 않는다.**
+STEP 12까지 끝나면 GA-2 완료다.
+**STEP 11-C에서만 메일 1통이 나가고, 그 외 어떤 단계에서도 Brief는 생성되지 않고 메일은 나가지 않는다.**
 
 > STEP 9에서 생성과 등록을 **하나의 단계로 묶는 이유**: App Password는 **생성 직후 한 번만 표시**되고
 > 이후 다시 볼 수 없다. 중간에 어딘가 적어 두는 상태를 만들지 않기 위해 즉시 Secret에 넣는다.
