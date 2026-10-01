@@ -699,7 +699,7 @@ STEP 5  발송 :  gmail_send.py         — STEP 4가 ALL PASS일 때만 if: 조
 | ~~10~~ | ~~SMTP 연결성 프로브 — TCP+EHLO만~~ | **완료 2026-09-30** — 465·587 모두 EHLO 250 + AUTH 광고 확인. **egress 열림** (§3-2) |
 | ~~11~~ | ~~**GA-2B SMTP AUTH 프로브** — 587/STARTTLS + TLS 실검증 + `login()` + NOOP + QUIT. **발송 없음**~~ | **완료 2026-10-01 — Overall PASS 2회 재현** (§3-2). 메일 미발송. **인증 경로 정상 확정, Secret 동결** |
 | ~~11-C~~ | ~~**GA-2C 발송 테스트** — `[TEST]` 메일 **1통**만 `WIB_RECIPIENT`로 발송~~ | **완료 2026-10-01 — Overall PASS. 1통 발송·수신 확인** (§3-2). 원장 `2026-W40/TEST` 기록 |
-| **12** | Gemini 최소 호출 200 확인 (Brief 생성 없이) | **대기 — GA-2 의 마지막 미완 단계. GA-3 의 선행 조건** |
+| **12** | Gemini 최소 호출 200 확인 (Brief 생성 없이) — `.github/workflows/gemini-probe.yml` | **workflow 준비 완료 2026-10-01 / 실행 대기 (사용자 수동). 호출 1회 = RPD 20 중 1** |
 
 STEP 12까지 끝나면 GA-2 완료다.
 **STEP 11-C에서만 메일 1통이 나가고, 그 외 어떤 단계에서도 Brief는 생성되지 않고 메일은 나가지 않는다.**

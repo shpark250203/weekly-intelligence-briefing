@@ -1,0 +1,377 @@
+# GA-2 STEP 12 — Gemini 최소 호출 프로브
+#
+# 목적: 러너에서 `GEMINI_API_KEY` 로 Gemini API 가 **200을 반환하는지** 확인한다.
+#       설계(ga2_auth_design.md §5)는 STEP 12 완료를 GA-2 완료 조건으로 규정하며,
+#       GA-3 의 선행 조건이다.
+#
+# 이 workflow 가 하는 것 (이게 전부다):
+#   generateContent 를 **정확히 1회** 호출하고 응답 상태·모델·토큰 수를 기록한다.
+#
+# 한 번의 호출로 GA-3 가 의존하는 4가지를 동시에 확인한다:
+#   1 HTTP 200          — 키·네트워크·엔드포인트
+#   2 모델 사용 가능     — 해당 모델 ID 가 이 계정에서 열려 있는지
+#   3 구조화 출력 동작   — responseMimeType + responseSchema (§2-2 필수 전제)
+#   4 토큰 회계          — usageMetadata 수신 여부 (§2-4 #7 계측 기반)
+#
+# 절대 하지 않는 것:
+#   - 2회 이상 호출 (RPD 20 의 1 만 쓴다. 재시도 없음 — §2-4 #4)
+#   - Weekly Brief 생성 · 기사 수집
+#   - 메일 발송 (SMTP 코드가 존재하지 않는다)
+#   - schedule 자동 실행 (workflow_dispatch 전용)
+#   - CLOUD_MODE 조회·생성
+#   - 프롬프트에 민감정보 투입 (§2-6) — 고정 문자열 1줄뿐이며
+#     수신주소·Secret·로컬경로·발송이력·기사본문을 넣지 않는다
+#   - API Key 를 URL 에 넣는 것 (쿼리스트링은 로그에 남을 수 있으므로 헤더로만 보낸다)
+#   - 모델 ID 하드코딩 (§2-1 — Variable 우선, 없으면 입력값)
+#   - 저장소 쓰기 (permissions: contents: read, checkout 하지 않음)
+#
+# 출력: HTTP status / 모델 / 구조화 출력 성공 여부 / 토큰 수 / 오류 category 뿐이다.
+
+name: GA-2 STEP 12 Gemini Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: '호출할 모델 ID. Repository Variable GEMINI_MODEL 이 있으면 그 값이 우선한다.'
+        required: false
+        default: 'gemini-2.5-flash'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ga2-step12-gemini-probe
+  cancel-in-progress: false
+
+jobs:
+  gemini-probe:
+    name: Probe Gemini API (1 call, no brief, no mail)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Write probe script
+        run: |
+          set -uo pipefail
+          mkdir -p "${RUNNER_TEMP}/step12"
+          cat > "${RUNNER_TEMP}/step12/gemini_probe.py" <<'PYEOF'
+          # GA-2 STEP 12 Gemini 프로브 — generateContent 를 정확히 1회 호출한다.
+          # Brief 를 만들지 않고, 메일을 보내지 않고, 재시도하지 않는다.
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.request
+
+          ENDPOINT = (
+              "https://generativelanguage.googleapis.com/v1beta/models/"
+              "%s:generateContent"
+          )
+          TIMEOUT = 60
+
+          # §2-6 최소노출: 프롬프트는 이 고정 1줄뿐이다.
+          # 기사 본문·수신주소·Secret·로컬경로·발송이력을 넣지 않는다.
+          PROMPT = "Reply with status ok and echo the number 12."
+
+          # §2-2 가 요구하는 구조화 출력을 같은 호출에서 함께 검증한다.
+          SCHEMA = {
+              "type": "OBJECT",
+              "properties": {
+                  "status": {"type": "STRING"},
+                  "step": {"type": "INTEGER"},
+              },
+              "required": ["status", "step"],
+          }
+
+          checks = {
+              "HTTP_200": "FAIL",
+              "MODEL_AVAILABLE": "FAIL",
+              "STRUCTURED_OUTPUT": "FAIL",
+              "TOKEN_ACCOUNTING": "FAIL",
+          }
+          category = None
+          http_status = None
+          err_detail = None
+          model_used = None
+          tokens_in = None
+          tokens_out = None
+          tokens_total = None
+          parsed_ok = None
+          notes = []
+          call_count = 0
+
+          api_key = os.environ.get("GEMINI_API_KEY", "")
+          # Variable 이 설정돼 있으면 그 값이 우선한다 (§2-1 하드코딩 금지).
+          # GEMINI_MODEL Variable 은 GA-3 에서 생성 예정이므로 지금은 비어 있을 수 있다.
+          model_var = os.environ.get("GEMINI_MODEL_VAR", "").strip()
+          model_in = os.environ.get("GEMINI_MODEL_INPUT", "").strip()
+          model = model_var or model_in
+
+          if model_var:
+              notes.append("모델 출처: Repository Variable `GEMINI_MODEL`")
+          elif model_in:
+              notes.append(
+                  "모델 출처: workflow 입력값 "
+                  "(Variable `GEMINI_MODEL` 미설정 — GA-3 에서 생성 예정)"
+              )
+
+          MODEL_RE = re.compile(r"^[A-Za-z0-9.\-]{1,64}$")
+
+
+          def sanitize(raw):
+              """응답·오류 문구에서 API Key 를 제거하고 길이를 제한한다."""
+              if raw is None:
+                  return None
+              if isinstance(raw, (bytes, bytearray)):
+                  text = bytes(raw).decode("utf-8", "replace")
+              else:
+                  text = str(raw)
+              text = " ".join(text.split())
+              if api_key and len(api_key) >= 8:
+                  text = text.replace(api_key, "[REDACTED-KEY]")
+              # key= 형태가 섞여 나오는 경우까지 방어적으로 지운다.
+              text = re.sub(r"(key=)[^&\s\"']+", r"\1[REDACTED]", text)
+              if len(text) > 300:
+                  text = text[:300] + " ...(truncated)"
+              return text
+
+
+          def classify_http(status, text):
+              t = (text or "").lower()
+              if status == 400 and "api key not valid" in t:
+                  return "API_KEY_INVALID"
+              if status in (401, 403):
+                  if "api has not been used" in t or "disabled" in t:
+                      return "API_NOT_ENABLED"
+                  return "AUTH_FORBIDDEN"
+              if status == 404:
+                  return "MODEL_NOT_FOUND"
+              if status == 429:
+                  # §2-5 — quota 초과는 재시도로 뚫지 않는다.
+                  return "QUOTA_EXCEEDED_429"
+              if status and 500 <= status < 600:
+                  return "SERVER_ERROR_%d" % status
+              if status == 400:
+                  return "BAD_REQUEST_400"
+              return "HTTP_%s" % status
+
+
+          if not api_key:
+              category = "SECRET_MISSING_GEMINI_API_KEY"
+          elif not model or not MODEL_RE.match(model):
+              category = "MODEL_ID_INVALID"
+          else:
+              payload = {
+                  "contents": [{"parts": [{"text": PROMPT}]}],
+                  "generationConfig": {
+                      "responseMimeType": "application/json",
+                      "responseSchema": SCHEMA,
+                      "maxOutputTokens": 256,
+                      "temperature": 0,
+                  },
+              }
+              req = urllib.request.Request(
+                  ENDPOINT % model,
+                  data=json.dumps(payload).encode("utf-8"),
+                  method="POST",
+              )
+              # Key 는 헤더로만 보낸다. URL 쿼리에 넣지 않는다.
+              req.add_header("x-goog-api-key", api_key)
+              req.add_header("Content-Type", "application/json")
+
+              try:
+                  call_count += 1  # 이 지점이 유일한 호출이다. 재시도 없음.
+                  with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                      http_status = resp.getcode()
+                      raw = resp.read().decode("utf-8", "replace")
+                  if http_status == 200:
+                      checks["HTTP_200"] = "PASS"
+                      checks["MODEL_AVAILABLE"] = "PASS"
+                      model_used = model
+                      try:
+                          body = json.loads(raw)
+                      except Exception:
+                          body = None
+                          category = "RESPONSE_NOT_JSON"
+
+                      if body is not None:
+                          usage = body.get("usageMetadata") or {}
+                          tokens_in = usage.get("promptTokenCount")
+                          tokens_out = usage.get("candidatesTokenCount")
+                          tokens_total = usage.get("totalTokenCount")
+                          if tokens_total is not None:
+                              checks["TOKEN_ACCOUNTING"] = "PASS"
+
+                          # 구조화 출력 검증 — 모델이 돌려준 텍스트가
+                          # 스키마대로 파싱되고 required 키를 갖는지 본다.
+                          try:
+                              cands = body.get("candidates") or []
+                              parts = (cands[0].get("content") or {}).get("parts") or []
+                              text = parts[0].get("text", "")
+                              obj = json.loads(text)
+                              if isinstance(obj, dict) and "status" in obj and "step" in obj:
+                                  checks["STRUCTURED_OUTPUT"] = "PASS"
+                                  parsed_ok = True
+                              else:
+                                  category = "SCHEMA_KEYS_MISSING"
+                                  parsed_ok = False
+                          except Exception:
+                              category = "STRUCTURED_OUTPUT_PARSE_FAILED"
+                              parsed_ok = False
+                  else:
+                      category = classify_http(http_status, raw)
+              except urllib.error.HTTPError as e:
+                  http_status = e.code
+                  try:
+                      body_txt = e.read().decode("utf-8", "replace")
+                  except Exception:
+                      body_txt = ""
+                  err_detail = sanitize(body_txt)
+                  category = classify_http(http_status, body_txt)
+              except urllib.error.URLError as e:
+                  category = "NETWORK_ERROR"
+                  err_detail = sanitize(getattr(e, "reason", None))
+              except Exception as e:
+                  category = "UNEXPECTED_" + type(e).__name__
+
+          overall = "PASS" if all(v == "PASS" for v in checks.values()) else "FAIL"
+
+          lines = []
+          lines.append("| 확인 항목 | 결과 |")
+          lines.append("|---|---|")
+          lines.append("| HTTP 200 | **%s** |" % checks["HTTP_200"])
+          lines.append("| 모델 사용 가능 | **%s** |" % checks["MODEL_AVAILABLE"])
+          lines.append("| 구조화 출력 (responseSchema) | **%s** |" % checks["STRUCTURED_OUTPUT"])
+          lines.append("| 토큰 회계 (usageMetadata) | **%s** |" % checks["TOKEN_ACCOUNTING"])
+          lines.append("| **Overall** | **%s** |" % overall)
+
+          diag = []
+          diag.append("- Gemini 호출 수: **%d회** (재시도 없음 — RPD 20 중 %d 소비)"
+                      % (call_count, call_count))
+          diag.append("- 모델: `%s`" % (model_used or model or "(미확인)"))
+          if http_status is not None:
+              diag.append("- HTTP status: `%s`" % http_status)
+          if tokens_total is not None:
+              diag.append(
+                  "- 토큰: in `%s` / out `%s` / total `%s`"
+                  % (tokens_in, tokens_out, tokens_total)
+              )
+          if category:
+              diag.append("- 오류 category: `%s`" % category)
+          if err_detail:
+              diag.append("- Sanitized error: `%s`" % err_detail)
+          for n in notes:
+              diag.append("- NOTE: %s" % n)
+          if category == "QUOTA_EXCEEDED_429":
+              diag.append(
+                  "- **RPD 20 소진 가능성.** §2-5 에 따라 재시도하지 않는다. "
+                  "날짜가 바뀐 뒤 1회만 재실행한다."
+              )
+          diag.append("- Weekly Brief 생성: **없음** / 메일 발송: **없음**")
+
+          body_md = "\n".join(lines) + "\n\n" + "\n".join(diag) + "\n"
+
+          print(body_md)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("## GA-2 STEP 12 — Gemini Probe\n\n")
+                  fh.write(body_md)
+                  fh.write("\n> 이 실행은 Gemini 를 **1회만** 호출했다. ")
+                  fh.write("Weekly Brief 는 생성되지 않았고 메일은 발송되지 않았다.\n")
+
+          raise SystemExit(0 if overall == "PASS" else 1)
+          PYEOF
+          echo "probe script written."
+
+      - name: Guard — 호출 1회·발송 부재·민감정보 부재 정적 검사
+        run: |
+          set -uo pipefail
+          SCRIPT="${RUNNER_TEMP}/step12/gemini_probe.py"
+
+          echo "Python 문법 검사 (호출 전에 걸러낸다 — RPD 예산 보호):"
+          if ! python3 -m py_compile "$SCRIPT"; then
+            echo "::error::스크립트에 문법 오류가 있다. API 를 호출하지 않고 중단한다."
+            exit 1
+          fi
+          echo "  -> 문법 OK."
+
+          echo "API 호출 지점 검사 (urlopen 이 정확히 1회여야 한다):"
+          N=$(grep -cE '^[^#]*urllib\.request\.urlopen[[:space:]]*\(' "$SCRIPT" || true)
+          echo "  urlopen 호출: ${N}건"
+          if [ "$N" -ne 1 ]; then
+            echo "::error::urlopen 이 1회가 아니다 (${N}건). RPD 예산을 보장할 수 없다."
+            exit 1
+          fi
+
+          echo "반복 호출 구조 검사:"
+          if grep -nE '^[^#]*(for|while)[^#]*(urlopen|generateContent)' "$SCRIPT"; then
+            echo "::error::루프 안에서 API 를 호출하는 코드가 발견되었다."
+            exit 1
+          fi
+          echo "  -> 0건."
+
+          echo "재시도 구조 검사:"
+          if grep -niE '^[^#]*(retry|retries|backoff|sleep)' "$SCRIPT"; then
+            echo "::error::재시도·백오프 코드가 발견되었다. §2-4 #4 위반."
+            exit 1
+          fi
+          echo "  -> 0건."
+
+          echo "발송 코드 부재 검사:"
+          if grep -nE '^[^#]*(smtplib|send_message|sendmail|GMAIL_|WIB_RECIPIENT)' "$SCRIPT"; then
+            echo "::error::메일 발송 관련 코드가 발견되었다. STEP 12 는 메일을 다루지 않는다."
+            exit 1
+          fi
+          echo "  -> 0건."
+
+          echo "API Key 를 URL 에 넣지 않는지 검사:"
+          if grep -nE '^[^#]*(key=|\?key|&key)' "$SCRIPT" | grep -vE 'REDACTED|re\.sub'; then
+            echo "::error::쿼리스트링에 key 를 넣는 코드가 발견되었다. 헤더로만 보낸다."
+            exit 1
+          fi
+          if ! grep -qF 'req.add_header("x-goog-api-key", api_key)' "$SCRIPT"; then
+            echo "::error::x-goog-api-key 헤더 전송 구문이 없다."
+            exit 1
+          fi
+          echo "  -> 헤더 전송 확인. URL 삽입 0건."
+
+          echo "Key 출력 검사:"
+          if grep -nE '^[^#]*(print|append|write)\(.*api_key' "$SCRIPT"; then
+            echo "::error::API Key 를 출력하는 코드가 발견되었다."
+            exit 1
+          fi
+          if grep -nE '^[^#]*len\([[:space:]]*api_key[[:space:]]*\)' "$SCRIPT" \
+             | grep -vE 'len\(api_key\)[[:space:]]*>=[[:space:]]*8'; then
+            echo "::error::Key 길이를 노출할 수 있는 코드가 발견되었다."
+            exit 1
+          fi
+          echo "  -> 0건."
+
+          echo "프롬프트 민감정보 검사 (§2-6):"
+          if grep -nE '^[^#]*PROMPT[[:space:]]*=' "$SCRIPT" \
+             | grep -niE '(recipient|@|password|token|secret|/home/|C:)'; then
+            echo "::error::프롬프트에 민감정보로 보이는 문자열이 있다."
+            exit 1
+          fi
+          echo "  -> 0건. 프롬프트는 고정 1줄."
+
+          echo "구조화 출력 전제 검사:"
+          for PAT in 'responseMimeType' 'responseSchema' 'usageMetadata'; do
+            if ! grep -qF "$PAT" "$SCRIPT"; then
+              echo "::error::필수 구문 누락: ${PAT}"
+              exit 1
+            fi
+          done
+          echo "  -> 3개 전부 존재."
+
+      - name: Run Gemini probe (1 call)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL_VAR: ${{ vars.GEMINI_MODEL }}
+          GEMINI_MODEL_INPUT: ${{ inputs.model }}
+        run: |
+          set -uo pipefail
+          python3 --version
+          python3 "${RUNNER_TEMP}/step12/gemini_probe.py"
