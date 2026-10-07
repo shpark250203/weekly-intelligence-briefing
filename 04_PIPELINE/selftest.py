@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import tempfile
+import re
 import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -177,6 +178,194 @@ def test_parsers():
     text2 = collector._decode(
         b'<meta charset="utf-8">' + "한글".encode("utf-8"), "")
     check("meta charset 디코딩", "한글" in text2)
+
+
+# ── 2-B. 커버리지 페이지 탐색 (가짜 목록으로, 네트워크 없음) ────
+def fake_site(day_per_page=2, with_dates=True, pages=40, noise_date=None):
+    """최신순 목록 사이트를 흉내낸다. page 1 이 가장 최신이다."""
+    import datetime as _dt
+
+    def build(page):
+        base = dt.date(2026, 10, 7) - _dt.timedelta(days=(page - 1) * day_per_page)
+        html = ["<html><body>"]
+        if noise_date:
+            html.append('<div class="side">인기기사 %s</div>' % noise_date)
+        for k in range(3):
+            day = base - _dt.timedelta(days=k % day_per_page)
+            html.append(
+                '<a href="/news/articleView.html?idxno=%d%d">기사 제목 %d-%d</a>'
+                % (page, k, page, k)
+            )
+            html.append("<span>기자 이름</span>")
+            if with_dates:
+                html.append("<span>%s 10:00</span>" % day.isoformat())
+            html.append("<p>본문 발췌 1,200억원 규모</p>")
+        html.append("</body></html>")
+        return "\n".join(html), base
+
+    pagemap = {}
+    for p in range(1, pages + 1):
+        html, base = build(p)
+        pagemap["https://fake.example.org/list?page=%d" % p] = (html, base)
+    pagemap["https://fake.example.org/list"] = pagemap[
+        "https://fake.example.org/list?page=1"]
+    return pagemap
+
+
+def install_fake_site(pagemap, article_date=None):
+    """collector 의 네트워크 경로만 대체한다. 실제 요청은 일어나지 않는다."""
+    calls = {"list": 0, "article": 0, "urls": []}
+
+    def fake_get(url):
+        calls["urls"].append(url)
+        if url in pagemap:
+            calls["list"] += 1
+            return 200, url, pagemap[url][0], ""
+        if "articleView" in url:
+            calls["article"] += 1
+            page = int(re.search(r"idxno=(\d+)", url).group(1)[:-1] or 1)
+            base = pagemap.get("https://fake.example.org/list?page=%d" % page)
+            day = (article_date or (base[1] if base else dt.date(2026, 10, 7)))
+            return 200, url, (
+                '<html><head><meta property="article:published_time" '
+                'content="%sT10:00:00+09:00"><title>기사 제목 %d</title></head>'
+                "<body><p>본문 발췌 1,200억원 규모 수출 13.5억 달러</p></body></html>"
+                % (day.isoformat(), page)
+            ), ""
+        return 404, url, "", "HTTP_404"
+
+    collector.http_get = fake_get
+    collector.robots_allowed = lambda u: True
+    return calls
+
+
+def test_window_pagination():
+    real_get, real_robots = collector.http_get, collector.robots_allowed
+    try:
+        src = {
+            "id": "fake", "name": "FAKE", "axis": "BEAUTY", "country": "KR",
+            "tier": 3, "kind": "list", "max_pages": 24, "max_articles": 12,
+            "urls": ["https://fake.example.org/list"],
+            "page_url": "https://fake.example.org/list?page={page}",
+            "article_res": [r"/news/articleView\.html\?idxno=\d+"],
+        }
+        start, end = C.coverage_window("2026-W38")
+
+        # 1) 3주 전 구간을 페이지 탐색으로 찾아낸다
+        calls = install_fake_site(fake_site())
+        items, attempts, status, note = collector.collect_list(src, start, end)
+        in_win = [i for i in items if C.in_window(i["published"], start, end)]
+        check("과거 주차를 페이지 탐색으로 도달", bool(in_win), str(status))
+        check("도달 상태 = usable",
+              status == "Checked — usable articles found", status)
+        check("구간 밖 기사는 본문을 읽지 않는다 (요청 절약)",
+              calls["article"] <= len(in_win) + 4,
+              "article=%d / in_win=%d" % (calls["article"], len(in_win)))
+        check("목록 요청이 상한 안",
+              calls["list"] <= src["max_pages"], str(calls["list"]))
+
+        # 2) 사이드바에 섞인 엉뚱한 날짜가 탐색을 흔들지 않는다 (중앙값 사용)
+        install_fake_site(fake_site(noise_date="2019-01-01"))
+        items2, _, status2, _ = collector.collect_list(src, start, end)
+        check("사이드바 날짜에 흔들리지 않는다",
+              status2 == "Checked — usable articles found"
+              and any(C.in_window(i["published"], start, end) for i in items2),
+              status2)
+
+        # 3) 페이지네이션이 없으면 구간 미도달을 Partial 로 남긴다 (허위 보고 금지)
+        nopage = dict(src)
+        nopage.pop("page_url")
+        nopage["max_pages"] = 1
+        install_fake_site(fake_site())
+        items3, _, status3, note3 = collector.collect_list(nopage, start, end)
+        check("페이지네이션 없으면 Partial Access", status3 == "Partial Access",
+              status3)
+        check("미도달 사실을 기록", any("미도달" in n for n in note3), str(note3))
+
+        # 4) 목록에 날짜가 없으면 첫 기사 1건으로 페이지 날짜를 가늠한다
+        probe_src = dict(src, max_pages=10)
+        install_fake_site(fake_site(with_dates=False))
+        items4, _, status4, note4 = collector.collect_list(probe_src, start, end)
+        check("목록 날짜가 없어도 본문 날짜로 구간을 찾는다",
+              any(C.in_window(i["published"], start, end) for i in items4),
+              status4)
+        check("페이지 날짜 탐색 사실을 기록",
+              any("페이지 날짜 탐색" in n for n in note4), str(note4))
+    finally:
+        collector.http_get, collector.robots_allowed = real_get, real_robots
+
+
+def test_feed_paging_and_datescan():
+    real_get, real_robots = collector.http_get, collector.robots_allowed
+    try:
+        start, end = C.coverage_window("2026-W38")
+
+        def feed_xml(day):
+            return (
+                '<?xml version="1.0"?><rss version="2.0"><channel>'
+                "<item><title>신제품 출시 기사</title>"
+                "<link>https://feed.example.org/%s</link>"
+                "<pubDate>%s 00:00:00 +0900</pubDate>"
+                "<description>가격 32,000원</description></item>"
+                "</channel></rss>"
+                % (day.isoformat(), day.strftime("%a, %d %b %Y"))
+            )
+
+        import datetime as _dt
+        pages = {}
+        for p in range(1, 11):
+            day = dt.date(2026, 10, 7) - _dt.timedelta(days=(p - 1) * 4)
+            pages["https://feed.example.org/feed/?paged=%d" % p] = feed_xml(day)
+        pages["https://feed.example.org/feed/"] = pages[
+            "https://feed.example.org/feed/?paged=1"]
+
+        def fake_get(url):
+            if url in pages:
+                return 200, url, pages[url], ""
+            return 404, url, "", "HTTP_404"
+
+        collector.http_get = fake_get
+        collector.robots_allowed = lambda u: True
+        src = {"id": "f", "name": "F", "axis": "PRODUCT_US", "country": "US",
+               "tier": 3, "kind": "feed", "max_pages": 10,
+               "urls": ["https://feed.example.org/feed/"],
+               "page_url": "https://feed.example.org/feed/?paged={page}"}
+        items, _, status, _ = collector.collect_feed(src, start, end)
+        check("paged 피드로 과거 주차 항목 확보",
+              bool(items) and status == "Checked — usable articles found", status)
+
+        nopage = dict(src)
+        nopage.pop("page_url")
+        nopage["max_pages"] = 1
+        items2, _, status2, note2 = collector.collect_feed(nopage, start, end)
+        check("페이지 없는 RSS 는 과거 주차 미도달을 Partial 로 남긴다",
+              status2 == "Partial Access" and not items2, status2)
+        check("RSS 한계를 기록", any("RSS" in n for n in note2), str(note2))
+
+        # datescan — 200 + 본문이 확인된 URL 만 채택한다
+        def date_get(url):
+            if url.endswith("20260916a.htm"):
+                return 200, url, (
+                    "<html><head><title>FOMC statement</title></head><body>"
+                    + ("<p>The Committee raised the target range 25 bp.</p>" * 40)
+                    + "</body></html>"), ""
+            return 404, url, "", "HTTP_404"
+
+        collector.http_get = date_get
+        ds = {"id": "d", "name": "D", "axis": "TIER1", "country": "US",
+              "tier": 1, "kind": "datescan",
+              "url_template": "https://fed.example.org/monetary{YYYYMMDD}a.htm",
+              "urls": ["https://fed.example.org/"]}
+        items3, attempts3, status3, note3 = collector.collect_datescan(ds, start, end)
+        check("datescan 은 200 확인된 날짜만 채택", len(items3) == 1, str(len(items3)))
+        check("datescan URL 은 실제로 열린 것만",
+              items3 and items3[0]["url"].endswith("20260916a.htm"))
+        check("datescan 은 구간 7일을 모두 시도", len(attempts3) == 7,
+              str(len(attempts3)))
+        check("datescan 결과 상태", status3 == "Checked — usable articles found",
+              status3)
+    finally:
+        collector.http_get, collector.robots_allowed = real_get, real_robots
 
 
 # ── 3. 2-of-5 · 숫자 검증 ───────────────────────────────────────
@@ -664,6 +853,8 @@ def main():
     test_time()
     test_filters()
     test_parsers()
+    test_window_pagination()
+    test_feed_paging_and_datescan()
     test_selection_and_numbers()
     test_signal_and_price()
     test_budget()

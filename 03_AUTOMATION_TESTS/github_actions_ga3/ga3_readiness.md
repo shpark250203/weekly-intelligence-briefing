@@ -188,6 +188,7 @@ GA-3는 발송을 검증하는 단계가 아니다 — 그것은 GA-2C에서 이
 |---|---|
 | 2026-10-01 | 최초 작성. GA-2C PASS 기록 후 GA-3 준비 상태·블로커 2건·권고 순서 정리. **GA-3 미실행** |
 | 2026-10-01 | 순서 A 착수 — STEP 12 Gemini 프로브 workflow 신설(`gemini-probe.yml`). **미실행.** 블로커 ②(파이프라인 코드 0건)는 그대로 |
+| 2026-10-07 | Dry Run 3회차: C2·C3·C5 FAIL 진단 → 원인은 "최신 목록만 수집"(커버리지 3주 전). 수집기에 커버리지 페이지 탐색·Tier 1 datescan·피드 페이지네이션 추가. 실제 W38 수집 126건 + QA dry test Critical 전부 PASS. **§8-8 참조. 재실행 대기** |
 | 2026-10-07 | Dry Run 2회 503 실패 → Gemini 재시도 backoff 개정(단계당 3회 시도 · 60→120초). **§8-7 참조. 재실행 대기** |
 | 2026-10-07 | STEP 12 PASS(`gemini-3.8-flash`) 확인 → 블로커 ① 해소. 파이프라인 9개 모듈 + GA-3 workflow 신설로 블로커 ② 해소. 발송 정책을 `[TEST]` 1통(사용자 확인 입력 필수)으로 확정. **§8 참조. GA-3 자체는 아직 미실행** |
 
@@ -314,3 +315,88 @@ Summary·QA 에 **attempt count / retry count / 마지막 HTTP status / final ca
 자체 점검(pyodide): py_compile 오류 0 / selftest **112 PASS · 0 FAIL**
 (503 3회 시도·60→120초 backoff·400/403/500 즉시 중단·예산 1이면 재시도 없음 포함) /
 Guard 전체 exit 0 / 가짜 Gemini 전구간 7호출·`SEND_TEST` 유지.
+
+### 8-8. Dry Run 3회차 진단 — C2·C3·C5 FAIL 의 단일 원인과 수정 (2026-10-07)
+
+Workflow·Gemini(200/OK)·Brief·Email·Gate 는 정상이었고, 막은 것은 **수집 범위**였다.
+
+#### 원인 — 세 FAIL 은 같은 뿌리다
+
+커버리지가 **W38(3주 전)** 인데 수집기는 각 Source 의 **최신 목록 1페이지만** 읽었다.
+실측(2026-10-07): 뷰티 5개 매체 목록 1페이지에 보이는 기사는 전부 10-02~10-07 자다.
+→ 커버리지 구간 기사 **0건** → Brief 가 빈 채로 만들어짐 →
+
+| FAIL | 계산식 | 0건일 때 |
+|---|---|---|
+| `C2_must_know_urls` | MUST KNOW ≥ 1 **그리고** 전부 URL 보유 | 선정할 Issue 가 없어 **0건 → FAIL** |
+| `C3_beauty_media` | `Not Checked` 0 **그리고** 반영 매체 ≥ 3 | 반영 매체 **0 → FAIL** |
+| `C5_url_rate_80` | URL 보유 / 전체 | 분모 0 → `0.0%` **→ FAIL** |
+
+→ `G3_critical_qa` FAIL → `BLOCKED_G3_critical_qa` → 발송 0통. **Gate 는 정상 동작했다.**
+
+#### 수정 — 수집기와 Source 품질만 (Gemini·Gmail·재시도·schedule 무수정)
+
+1. **커버리지 구간 페이지 탐색** (`collector.py`)
+   목록 행에 **사이트가 표시한 날짜**를 읽고, 구간이 시작되는 페이지를
+   **지수 탐색 + 이분 탐색**으로 찾은 뒤 구간을 벗어날 때까지만 전진한다.
+   구간 밖 행은 **본문을 요청하지 않는다**(요청 절약). 사이드바 날짜에 흔들리지 않도록
+   페이지 판단은 **중앙값**으로 하고, 행 단위 생략은 **±3일 여유**를 둔다.
+2. **목록에 날짜가 없는 게시판**(통계청 등, `max_pages ≤ 12`)은 페이지마다
+   **첫 기사 1건만** 열어 그 페이지의 날짜를 가늠한다.
+3. **피드 페이지네이션** — WordPress `?paged=N` 지원 (Glossy·WWD·NewBeauty).
+   RSS 가 최신만 제공해 과거 주차에 닿지 못하면 `Partial Access` 로 기록한다.
+4. **Tier 1 원문 직접 확보** — Fed 성명은 `monetary{YYYYMMDD}a.htm` 날짜 템플릿으로
+   구간의 각 날짜를 **요청해 200 + 본문이 확인된 URL만** 채택한다(`datescan`).
+   식약처는 `view.do?seq=` 패턴과 `page=N`, 통계청은 javascript 목록에서 **실제 URL
+   문자열을 추출**(조립 아님)해 `nPage=N` 으로 과거 목록까지 간다.
+5. **경로·패턴 실측 교정** — 뷰티누리 `/news/lists/...`(단수 아님), 코스모닝·코스인코리아
+   `article_list_all.html?page=N`, CMN `news_view.asp?news_idx=N`, 기사 URL 의
+   `&amp;` 해제, 제목은 기사 `<title>` 우선(목록 라벨의 리드 혼입 제거).
+6. **없는 URL 을 만들지 않는다** — 관세청은 목록이 열리지만 개별 글이 JS 네비게이션뿐이고,
+   `data-id` 로 조립한 URL 은 200 이지만 "시스템안내" 안내 페이지였다(실측).
+   따라서 **조립하지 않고** 목록 접근 사실만 `Partial Access` 로 남긴다.
+7. **상태 표기 정직화** — 최신 구간만 보고 끝난 경우를 "기사 없음"이 아니라
+   **`Partial Access` + 구간 미도달**로 기록한다.
+
+#### 검증 (실제 네트워크 + 실제 W38 데이터, Gemini 미호출)
+
+실제 사이트에 붙여 W38 을 수집한 결과:
+
+| Source | 상태 | 커버리지 내 | 비고 |
+|---|---|---|---|
+| 장업신문 | usable | **23** | 목록 2페이지 |
+| 코스인코리아 | usable | **31** | 구간 시작 페이지 4 (이분 탐색) |
+| 코스모닝 | usable | **31** | 목록 3페이지 |
+| CMN | usable | 1 | 페이지네이션 없음 — 최신 목록에서 1건 |
+| 뷰티누리 | usable | 1 | 깊이 한계 — 모바일 목록에서 1건 |
+| **식약처 (Tier 1)** | usable | **18** | 구간 시작 페이지 4. 화장품 단속·표시 규제 포함 |
+| **Fed 성명 (Tier 1)** | usable | **1** | **2026-09-16 FOMC 성명 원문** (W38 기준선의 1순위 Source) |
+| Fed 보도자료 (Tier 1) | usable | 2 | 연도 목록에서 구간 행만 |
+| Glossy (US 신제품) | usable | **18** | `?paged=` 3페이지 |
+| fashion-press (JP) | Partial | 0 | 페이지네이션 경로 미확인 (404) |
+
+수집 **126건 / 중복 제거 94건**. 이어서 **가짜 엔진**(실제 Gemini 호출 0회)으로
+build → qa → gate 를 돌린 QA dry test:
+
+| 지표 | 값 |
+|---|---|
+| C1~C7 Critical | **전부 PASS** (FAIL 0) |
+| C2 MUST KNOW | 8건, 전부 Article URL 보유 |
+| C3 Beauty | `Not Checked` 0 / 반영 매체 **4** |
+| C5 Article URL 확보율 | **100.0%** (50/50) |
+| Tier 1 직접 확인 | **12** (합격선 2 이상) |
+| 최종 사용 Issue | **43** (합격선 20 이상) |
+| Gate 결정 | **SEND_TEST** |
+
+selftest **128 PASS / 0 FAIL**(페이지 탐색·힌트 생략·피드 페이지·datescan 포함),
+Guard 정적검사 exit 0, workflow YAML 검증 OK.
+
+#### 남는 한계 (낮추지 않고 기록한다)
+
+- **JP 신제품**: fashion-press·@cosme·기업 뉴스룸 모두 과거 주차 페이지 경로가 없다
+  → W38 에서는 0건 가능. 합격선 B5(총 10건 이상)는 KR+US 로만 채워야 한다.
+- **AXIS 1 국내**: 연합뉴스·한국경제는 목록 페이지 상한(40) 안에서 3주 전에 닿지 못하고,
+  매일경제는 목록에 날짜 표기가 없다 → W38 에서는 `Partial Access` 가 정상.
+  **현재 주차 실행(GA-4)에서는 1페이지로 충족된다.**
+- **Beauty Source concentration**: 실제 반영이 코스인코리아·코스모닝에 쏠려
+  `SOURCE CONCENTRATION WARNING` 이 뜰 수 있다 (Non-Critical, QA 에 기록).

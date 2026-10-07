@@ -6,6 +6,21 @@
 하지 않는 것: AI 호출 0건 / 메일 발송 0건 / 저장소 쓰기 0건
              (산출물은 --out 경로에만 쓴다, 기본값은 러너 임시 디렉터리).
 
+커버리지 도달 방식 (2026-10-07 개정 — Dry Run 진단 결과)
+  최신 목록 1페이지만 읽으면 **지난 주차 기사가 0건**이 된다. 실제로 W38(3주 전)
+  Dry Run 에서 그 일이 일어나 Brief 가 비고 C2·C3·C5 가 FAIL 했다.
+  따라서 목록형 Source 는 **페이지네이션을 날짜 기준으로 탐색**한다:
+    1 목록 HTML 의 행에 붙은 날짜(힌트)를 읽는다 — 사이트가 표시한 값만 쓴다.
+    2 커버리지 구간이 시작되는 페이지를 **지수 탐색 + 이분 탐색**으로 찾는다.
+    3 그 페이지부터 구간을 벗어날 때까지만 전진하며, **구간 안의 기사만** 본문을 읽는다.
+  페이지네이션이 없거나 상한 안에서 구간에 닿지 못하면 `Partial Access` 로 남긴다.
+
+URL 을 만들어내지 않는다
+- 기사 URL 은 목록 페이지에 실제로 있는 링크만 쓴다.
+- 날짜 템플릿 Source(`datescan`)는 **먼저 요청해 200 과 본문을 확인한 URL만** 채택한다.
+  (관세청처럼 JS 네비게이션으로만 열리는 목록은 URL 을 조립하지 않고 Partial 로 남긴다 —
+   조립한 URL 이 200 을 주더라도 안내 페이지였던 실측 사례가 있다.)
+
 우회하지 않는 것
 - robots.txt 를 먼저 읽고, 우리 UA 에 대한 Disallow 가 있으면 요청을 보내지 않는다.
 - 봇 차단·CAPTCHA 화면을 만나면 BLOCKED 로 기록만 한다.
@@ -99,7 +114,7 @@ def _decode(raw, content_type):
     return raw.decode("utf-8", "replace")
 
 
-def robots_allowed(url):
+def robots_allowed_impl(url):
     """robots.txt 를 읽고 우리 UA 로 허용되는지 본다. 읽을 수 없으면 허용으로 본다."""
     parts = urllib.parse.urlsplit(url)
     base = "%s://%s" % (parts.scheme, parts.netloc)
@@ -116,9 +131,14 @@ def robots_allowed(url):
     if rp is None:
         return True
     try:
-        return rp.can_fetch(UA, url) or rp.can_fetch("*", url)
+        return rp.can_fetch(UA, url)
     except Exception:
         return True
+
+
+def robots_allowed(url):
+    """테스트에서 대체 주입할 수 있도록 얇게 감싼다."""
+    return robots_allowed_impl(url)
 
 
 def http_get(url):
@@ -189,23 +209,116 @@ def parse_feed(text):
 
 def extract_links(html, base_url, article_res):
     """목록 HTML → [(절대URL, 제목)]. 중복은 URL 기준으로 한 번만."""
+    return [(r["url"], r["title"])
+            for r in extract_rows(html, base_url, article_res)]
+
+
+# 목록 행에 붙은 날짜 힌트 — 사이트가 표시한 값만 읽는다. 추정하지 않는다.
+HINT_RES = [
+    re.compile(r"(20\d{2})[-./](\d{1,2})[-./](\d{1,2})"),          # 2026-09-16
+    re.compile(r"(20\d{2})년\s*(\d{1,2})월\s*(\d{1,2})일"),         # 2026년 9월 16일
+    re.compile(r"\b(\d{1,2})/(\d{1,2})/(20\d{2})\b"),              # 9/16/2026 (US)
+    re.compile(r"(?<![\d.])(\d{1,2})[-.](\d{1,2})\s+\d{1,2}:\d{2}"),  # 09-16 10:04
+]
+# 행 문맥: 이 기사 링크 뒤부터 **다음 기사 링크 앞까지**가 그 행이다.
+# (국내 언론 목록은 "링크 → 제목/리드 → 기자 → 날짜 → 다음 링크" 순서가 많다.)
+ROW_FORWARD_MAX = 2500
+ROW_BACKWARD = 400
+HINT_TOLERANCE_DAYS = 3   # 힌트로 본문 요청을 생략할 때의 안전 여유
+
+
+def _hint_candidates(text, ref_year):
+    """문맥에서 (위치, 날짜) 후보를 전부 모은다. 연도는 ±1년만 인정한다."""
+    import datetime as _dt
+    out = []
+    for idx, pat in enumerate(HINT_RES):
+        for m in pat.finditer(text):
+            try:
+                if idx == 2:                      # M/D/YYYY
+                    mo, day, year = (int(m.group(1)), int(m.group(2)),
+                                     int(m.group(3)))
+                elif idx == 3:                    # MM-DD (연도 표기 없음)
+                    year, mo, day = ref_year, int(m.group(1)), int(m.group(2))
+                else:
+                    year, mo, day = (int(m.group(1)), int(m.group(2)),
+                                     int(m.group(3)))
+                if abs(year - ref_year) > 1:
+                    continue
+                out.append((m.start(),
+                            _dt.datetime(year, mo, day, 12, 0, tzinfo=C.KST)))
+            except ValueError:
+                continue
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def parse_hint(text, ref_year):
+    """문맥에서 **가장 앞**(링크에 가장 가까운) 날짜. 못 찾으면 None."""
+    cands = _hint_candidates(text, ref_year)
+    return cands[0][1] if cands else None
+
+
+def parse_hint_last(text, ref_year):
+    """문맥에서 **가장 뒤**(링크에 가장 가까운) 날짜. 못 찾으면 None."""
+    cands = _hint_candidates(text, ref_year)
+    return cands[-1][1] if cands else None
+
+
+def row_hint(html, start, end, next_start, ref_year):
+    """행의 날짜 힌트 — 링크 뒤(다음 링크 앞까지)를 먼저 보고, 없으면 링크 앞을 본다."""
+    if not ref_year:
+        return None
+    stop = min(next_start if next_start else len(html), end + ROW_FORWARD_MAX)
+    hint = parse_hint(C.strip_tags(html[end:stop]), ref_year)
+    if hint is None:
+        back = C.strip_tags(html[max(0, start - ROW_BACKWARD):start])
+        hint = parse_hint_last(back, ref_year)
+    return hint
+
+
+def extract_rows(html, base_url, article_res, raw_res=(), ref_year=None):
+    """목록 HTML → [{url, title, hint}].
+
+    - `article_res` : <a href> 가 이 패턴에 맞는 링크만 기사로 본다.
+    - `raw_res`     : href 가 javascript 인 목록(통계청 등)을 위해, HTML 안의
+                      실제 URL 문자열 패턴을 직접 찾는다. **조립이 아니라 추출이다.**
+    - `hint`        : 같은 행에 사이트가 표시한 날짜 (없으면 None). 추정하지 않는다.
+    """
+    html = html or ""
     pats = [re.compile(p, re.I) for p in article_res]
-    found, seen = [], set()
-    for m in ANCHOR_RE.finditer(html or ""):
+    hits = []
+
+    for m in ANCHOR_RE.finditer(html):
         href, label = m.group(1).strip(), C.strip_tags(m.group(2))
         if not href or href.lower().startswith(("javascript:", "mailto:")):
             continue
         if not any(p.search(href) for p in pats):
             continue
-        absolute = urllib.parse.urljoin(base_url, href)
-        key = absolute.split("#")[0]
-        if key in seen:
-            continue
         if len(label) < 6:
             continue
+        # href 에 들어있는 HTML 엔티티를 풀어 실제 URL 형태로 만든다
+        # (&amp; 를 그대로 두면 기사 URL 이 망가진 형태로 기록된다).
+        href = href.replace("&amp;", "&")
+        hits.append((m.start(), m.end(),
+                     urllib.parse.urljoin(base_url, href), label))
+
+    for pattern in (raw_res or ()):
+        for m in re.finditer(pattern, html, re.I):
+            # 추출한 문자열 그대로 절대 URL 로 만든다 (파라미터를 바꾸지 않는다).
+            url = urllib.parse.urljoin(base_url, m.group(0).replace("&amp;", "&"))
+            hits.append((m.start(), m.end(), url, ""))
+
+    hits.sort(key=lambda h: h[0])
+    rows, seen = [], set()
+    for idx, (start, end, url, label) in enumerate(hits):
+        key = url.split("#")[0]
+        if key in seen:
+            continue
         seen.add(key)
-        found.append((key, label))
-    return found
+        next_start = hits[idx + 1][0] if idx + 1 < len(hits) else None
+        rows.append({"url": key, "title": label,
+                     "hint": row_hint(html, start, end, next_start, ref_year)})
+    return rows
 
 
 def extract_published(html):
@@ -283,116 +396,373 @@ def cluster(items, threshold=0.58):
 
 
 # ── Source 처리 ──────────────────────────────────────────────────
+def page_url(src, page):
+    """페이지 URL 템플릿. 템플릿이 없으면 1페이지만 본다."""
+    tpl = src.get("page_url")
+    if not tpl:
+        return None
+    return tpl.replace("{page}", str(page))
+
+
+def fetch_article(url, label, note):
+    """기사 1건을 읽어 (title, published, excerpt) 를 만든다. 실패하면 None."""
+    code, final, html, err = http_get(url)
+    if code != 200 or not html:
+        note.append("기사 요청 실패 %s" % (err or code))
+        return None
+    when = extract_published(html)
+    # 제목은 기사 페이지의 <title> 을 우선한다. 목록 라벨은 리드 문장이 붙어 오는
+    # 경우가 있어 보조로만 쓴다.
+    title = ""
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    if m:
+        cand = C.strip_tags(m.group(1))
+        # "매체명 :: 제목" / "제목 | 매체명" 형태에서 가장 긴 조각을 제목으로 본다.
+        parts = [p.strip() for p in re.split(r"\s*(?:::|\||>)\s*", cand) if p.strip()]
+        if parts:
+            cand = max(parts, key=len)
+        cand = re.sub(r"\s*-\s*[^-]{0,20}$", "", cand).strip()
+        if len(cand) >= 10:
+            title = cand
+    if not title:
+        title = (label or "").strip()
+    if not title:
+        return None
+    title = C.truncate(title, 140)
+    return {"title": title, "url": final, "published": when,
+            "excerpt": make_excerpt(title, html), "dated": when is not None}
+
+
+def fetch_list_page(src, url, note, attempts, ref_year):
+    """목록 1페이지 → rows. 차단·실패는 기록만 하고 [] 를 돌려준다."""
+    code, final, text, err = http_get(url)
+    blocked = bool(text) and bool(CHALLENGE_RE.search(text[:8000]))
+    attempts.append({"url": url, "http": code,
+                     "note": "BOT_CHALLENGE" if blocked else (err or "")})
+    if blocked:
+        note.append("%s -> 봇 차단 화면 (우회하지 않음)" % url)
+        return None
+    if code != 200 or not text:
+        note.append("%s -> %s" % (url, err or code))
+        return None
+    if url.endswith(".xml"):
+        return [{"url": r["url"], "title": r["title"],
+                 "hint": C.parse_datetime(r["published_raw"])}
+                for r in parse_feed(text)]
+    rows = extract_rows(text, final, src.get("article_res", []),
+                        src.get("raw_link_res", ()), ref_year)
+    if not rows:
+        rows = extract_rows(text, final, S.GENERIC_ARTICLE_RES,
+                            (), ref_year)
+        if rows:
+            note.append("%s -> 일반 패턴으로 링크 추출" % url)
+    return rows
+
+
+def span_of(rows):
+    """페이지의 (최신, 최오래, 중앙값) 날짜. 힌트가 없으면 (None, None, None).
+
+    사이드바(인기기사 등)의 날짜가 섞여도 흔들리지 않도록 **중앙값**을 함께 낸다.
+    페이지 탐색 판단은 중앙값으로 한다.
+    """
+    dates = sorted(r["hint"] for r in rows if r.get("hint"))
+    if not dates:
+        return None, None, None
+    return dates[-1], dates[0], dates[len(dates) // 2]
+
+
+def find_window_page(src, start, end, note, attempts, ref_year, max_pages):
+    """커버리지 구간이 시작되는 페이지를 지수 탐색 + 이분 탐색으로 찾는다.
+
+    반환 (page, rows). 힌트가 없으면 (1, rows) 로 두고 본문 날짜로 판정한다.
+    """
+    first = fetch_list_page(src, page_url(src, 1) or src["urls"][0],
+                            note, attempts, ref_year)
+    if not first:
+        return None, None
+    _, _, median = span_of(first)
+    if median is None:
+        note.append("목록에 날짜 표기 없음 — 본문 날짜로 판정한다")
+        return 1, first
+    if median <= end:
+        return 1, first            # 1페이지에 이미 구간이 걸쳐 있다
+    if not src.get("page_url"):
+        note.append("페이지네이션 미지원 — 최신 목록만 확인 (구간 미도달)")
+        return 1, first
+
+    # 지수 탐색 — 구간에 닿는 페이지를 넘어설 때까지 2배씩 건너뛴다.
+    lo, hi, hi_rows = 1, None, None
+    probe = 2
+    while probe <= max_pages:
+        rows = fetch_list_page(src, page_url(src, probe), note, attempts, ref_year)
+        if not rows:
+            break
+        _, _, p_median = span_of(rows)
+        if p_median is None:
+            break
+        if p_median <= end:
+            hi, hi_rows = probe, rows
+            break
+        lo = probe
+        probe *= 2
+    if hi is None:
+        note.append("페이지 상한(%d) 안에서 커버리지 구간에 닿지 못했다" % max_pages)
+        return None, None
+
+    # 이분 탐색 — 조건을 만족하는 가장 앞 페이지.
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        rows = fetch_list_page(src, page_url(src, mid), note, attempts, ref_year)
+        if not rows:
+            break
+        _, _, p_median = span_of(rows)
+        if p_median is None:
+            break
+        if p_median <= end:
+            hi, hi_rows = mid, rows
+        else:
+            lo = mid
+    note.append("커버리지 시작 페이지 = %d (지수+이분 탐색)" % hi)
+    return hi, hi_rows
+
+
+def collect_list(src, start, end):
+    """목록형 Source — 커버리지 구간 페이지만 걸어가며 그 구간 기사만 읽는다."""
+    items, attempts, note = [], [], []
+    ref_year = start.year
+    max_pages = int(src.get("max_pages", 1))
+    cap = int(src.get("max_articles", 12))
+
+    page, rows = find_window_page(src, start, end, note, attempts,
+                                  ref_year, max_pages)
+    if rows is None:
+        # 페이지 템플릿 경로가 실패하면 기본 URL과 Fallback 2~5 를 순서대로 시도한다.
+        for url in src["urls"]:
+            rows = fetch_list_page(src, url, note, attempts, ref_year)
+            if rows:
+                page = None
+                note.append("Fallback 경로 사용: %s" % url)
+                break
+        if not rows:
+            note.append(
+                "Fallback 1(검색엔진 도메인 한정 질의)은 러너에서 자동 실행하지 않는다"
+            )
+            return items, attempts, "Access Blocked", note
+
+    if cap <= 0:
+        note.append("목록 접근 확인. 상세 페이지는 수집 대상에서 제외 (%d건 링크)"
+                    % len(rows))
+        return items, attempts, "Partial Access", note
+
+    import datetime as _dt
+    slack = _dt.timedelta(days=HINT_TOLERANCE_DAYS)
+    # 목록에 날짜가 없는 게시판(통계청 등)은 페이지마다 **첫 기사 1건만** 열어
+    # 그 페이지의 날짜를 가늠한다. 깊은 뉴스 목록에는 쓰지 않는다(요청 폭증 방지).
+    probe_allowed = bool(src.get("page_url")) and max_pages <= 12
+    seen, undated, hint_skipped, pages_read, probed = set(), 0, 0, 0, 0
+    skipped_newer, skipped_older = 0, 0
+    reached_older = False
+    while rows is not None and pages_read < max_pages and len(items) < cap:
+        pages_read += 1
+        _, _, median = span_of(rows)
+        if median is None and probe_allowed and rows:
+            probe = fetch_article(rows[0]["url"], rows[0]["title"], note)
+            probed += 1
+            seen.add(rows[0]["url"])
+            if probe and probe["published"] is not None:
+                median = probe["published"]
+                if C.in_window(probe["published"], start, end):
+                    items.append(probe)
+                if median > end + slack:
+                    # 이 페이지는 전부 구간보다 최신 — 본문을 더 읽지 않고 넘어간다.
+                    note.append("페이지 %s 는 구간보다 최신(%s) — 건너뜀"
+                                % (page, C.date_only(median)))
+                    if page is None:
+                        break
+                    page += 1
+                    if page > max_pages:
+                        break
+                    rows = fetch_list_page(src, page_url(src, page), note,
+                                           attempts, ref_year)
+                    continue
+        for row in rows:
+            if len(items) >= cap:
+                break
+            if row["url"] in seen:
+                continue
+            seen.add(row["url"])
+            hint = row.get("hint")
+            # 힌트는 ±여유를 두고만 쓴다. 행-날짜 대응이 어긋나도 구간 기사를
+            # 놓치지 않게 하려는 것이다. 최종 판정은 본문 날짜로 한다.
+            if hint is not None and not C.in_window(hint, start - slack, end + slack):
+                hint_skipped += 1
+                if hint > end:
+                    skipped_newer += 1
+                else:
+                    skipped_older += 1
+                continue       # 목록이 표시한 날짜가 구간 밖 — 본문을 읽지 않는다
+            got = fetch_article(row["url"], row["title"], note)
+            if not got:
+                continue
+            if got["published"] is None and hint is not None:
+                got["published"] = hint      # 목록이 표시한 날짜를 쓴다 (추정 아님)
+                got["dated"] = True
+                got["date_from_list"] = True
+            if got["published"] is None:
+                undated += 1
+            items.append(got)
+        # 구간보다 더 과거로 넘어갔으면 멈춘다.
+        if median is not None and median < start - slack:
+            reached_older = True
+            break
+        if page is None or not src.get("page_url"):
+            break
+        page += 1
+        if page > max_pages:
+            break
+        rows = fetch_list_page(src, page_url(src, page), note, attempts, ref_year)
+
+    in_win = [i for i in items if C.in_window(i["published"], start, end)]
+    if hint_skipped:
+        note.append("목록 날짜로 구간 밖 %d건 건너뜀 (본문 요청 없음)" % hint_skipped)
+    note.append("목록 %d페이지 / 기사 %d건 열람 (페이지 날짜 탐색 %d건)"
+                % (pages_read, len(items), probed))
+    newest_item = max((i["published"] for i in items if i["published"]),
+                      default=None)
+    if not items:
+        if skipped_newer and not (skipped_older or reached_older):
+            # 최신 구간만 보고 끝났다 — "기사가 없다"가 아니라 "구간 미도달"이다.
+            status = "Partial Access"
+            note.append("커버리지보다 최신 목록만 확인 — 구간 미도달")
+        elif reached_older or skipped_older or hint_skipped:
+            status = "Checked — no significant news"
+            note.append("커버리지 구간을 지나갔으나 해당 기간 기사 0건")
+        else:
+            status = "Access Blocked"
+            note.append("커버리지 구간 기사 0건")
+    elif undated == len(items):
+        status = "Partial Access"
+        note.append("기사 %d건 접근했으나 보도일 확인 불가" % len(items))
+    elif in_win:
+        status = "Checked — usable articles found"
+    elif newest_item is not None and newest_item > end:
+        # 읽은 기사가 전부 구간보다 최신이면 "기사가 없다"가 아니라
+        # "구간에 닿지 못했다"가 사실이다.
+        status = "Partial Access"
+        note.append(
+            "열람 범위가 전부 커버리지 이후(최신 %s / 구간 종료 %s) — 구간 미도달"
+            % (C.date_only(newest_item), end.date())
+        )
+    else:
+        status = "Checked — no significant news"
+        note.append("접근 %d건 / 커버리지 내 0건" % len(items))
+    return items, attempts, status, note
+
+
 def collect_feed(src, start, end):
-    items, attempts, status, note = [], [], "Not Checked", []
-    for url in src["urls"]:
+    """피드형 Source. 페이지 파라미터가 있으면 구간까지 거슬러 올라간다."""
+    items, attempts, note = [], [], []
+    max_pages = int(src.get("max_pages", 1))
+    newest_seen = None
+    page, fetched_any = 1, False
+    while page <= max_pages:
+        url = page_url(src, page) or src["urls"][0]
         code, final, text, err = http_get(url)
         attempts.append({"url": url, "http": code, "note": err})
         if code != 200 or not text:
             note.append("%s -> %s" % (url, err or code))
-            continue
+            break
         feed = parse_feed(text)
         if not feed:
             note.append("%s -> FEED_PARSE_EMPTY" % url)
-            continue
+            break
+        fetched_any = True
+        page_newest, page_oldest = None, None
         for row in feed:
             when = C.parse_datetime(row["published_raw"])
+            if when is not None:
+                page_newest = when if page_newest is None else max(page_newest, when)
+                page_oldest = when if page_oldest is None else min(page_oldest, when)
+                newest_seen = when if newest_seen is None else max(newest_seen, when)
+            if when is not None and not C.in_window(when, start, end):
+                continue
             items.append({
                 "title": row["title"], "url": row["url"], "published": when,
                 "excerpt": make_excerpt(row["title"], row["summary"]),
                 "dated": when is not None,
             })
-        break
-    if items:
-        in_win = [i for i in items if C.in_window(i["published"], start, end)]
-        status = ("Checked — usable articles found" if in_win
-                  else "Checked — no significant news")
-        if not any(i["dated"] for i in items):
-            status = "Partial Access"
-            note.append("보도일 파싱 실패 — 커버리지 판정 불가")
-    else:
-        status = "Access Blocked"
-    return items, attempts, status, note
-
-
-def collect_list(src, start, end):
-    items, attempts, note = [], [], []
-    links, used_url = [], None
-    for url in src["urls"]:
-        code, final, text, err = http_get(url)
-        blocked = bool(text) and bool(CHALLENGE_RE.search(text[:8000]))
-        attempts.append({
-            "url": url, "http": code,
-            "note": "BOT_CHALLENGE" if blocked else (err or ""),
-        })
-        if blocked:
-            note.append("%s -> 봇 차단 화면 (우회하지 않음)" % url)
-            continue
-        if code != 200 or not text:
-            note.append("%s -> %s" % (url, err or code))
-            continue
-        if url.endswith(".xml"):
-            feed = parse_feed(text)
-            links = [(r["url"], r["title"]) for r in feed]
-        else:
-            links = extract_links(text, final, src.get("article_res", []))
-            if not links:
-                links = extract_links(text, final, S.GENERIC_ARTICLE_RES)
-                if links:
-                    note.append("%s -> 일반 패턴으로 링크 추출" % url)
-        if links:
-            used_url = url
+        if not src.get("page_url"):
             break
-        note.append("%s -> 기사 링크 0건" % url)
+        if page_oldest is not None and page_oldest < start:
+            break          # 구간보다 과거까지 내려왔다
+        page += 1
 
-    if not links:
-        status = "Access Blocked" if attempts else "Not Checked"
-        note.append(
-            "Fallback 1(검색엔진 도메인 한정 질의)은 러너에서 자동 실행하지 않는다"
-        )
-        return items, attempts, status, note
-
-    cap = int(src.get("max_articles", 12))
-    if cap <= 0:
-        # 목록은 열렸으나 본문 수집 대상이 아닌 Source (리테일러 상품 페이지 등).
-        note.append("목록 접근 확인. 상품 상세는 수집 대상에서 제외 (%d건 링크)" % len(links))
-        return items, attempts, "Partial Access", note
-
-    undated = 0
-    for url, label in links[:cap]:
-        code, final, html, err = http_get(url)
-        if code != 200 or not html:
-            note.append("기사 요청 실패 %s" % (err or code))
-            continue
-        when = extract_published(html)
-        if when is None:
-            undated += 1
-        title = label
-        m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-        if m:
-            cand = C.strip_tags(m.group(1))
-            cand = re.sub(r"\s*[|<>-]\s*[^|]{0,30}$", "", cand).strip()
-            if len(cand) >= len(title):
-                title = cand
-        items.append({
-            "title": title, "url": final, "published": when,
-            "excerpt": make_excerpt(title, html), "dated": when is not None,
-        })
-
-    in_win = [i for i in items if C.in_window(i["published"], start, end)]
-    if not items:
-        status = "Access Blocked"
-    elif undated == len(items):
-        status = "Partial Access"
-        note.append("기사 %d건 접근했으나 보도일 확인 불가 — 커버리지 판정 불가" % len(items))
-    elif in_win:
+    if not fetched_any:
+        return items, attempts, "Access Blocked", note
+    note.append("피드 %d페이지 열람" % min(page, max_pages))
+    if items:
         status = "Checked — usable articles found"
+    elif newest_seen is not None and newest_seen > end and not src.get("page_url"):
+        status = "Partial Access"
+        note.append(
+            "RSS 가 최신 항목만 제공해 과거 주차에 닿지 못했다 "
+            "(최신 %s / 커버리지 종료 %s)"
+            % (C.date_only(newest_seen), end.date())
+        )
     else:
         status = "Checked — no significant news"
-        note.append("접근 %d건 / 커버리지 내 0건" % len(items))
-    if used_url and used_url != src["urls"][0]:
-        note.append("Fallback 경로 사용: %s" % used_url)
+        note.append("커버리지 구간 항목 0건")
     return items, attempts, status, note
+
+
+def collect_datescan(src, start, end):
+    """날짜 템플릿 Source (예: Fed 성명 원문).
+
+    커버리지 구간의 각 날짜로 URL 을 만들어 **요청해 보고, 200 + 본문이 확인된 것만**
+    채택한다. 확인되지 않은 URL 은 버린다 — 없는 URL 을 기록하지 않는다.
+    """
+    import datetime as _dt
+    items, attempts, note = [], [], []
+    tpl = src["url_template"]
+    day = start.date()
+    hits = 0
+    while day <= end.date():
+        url = tpl.replace("{YYYYMMDD}", day.strftime("%Y%m%d"))
+        code, final, html, err = http_get(url)
+        attempts.append({"url": url, "http": code, "note": err or ""})
+        if code == 200 and html and len(html) > 2000:
+            got = fetch_article_from_html(html, final, day)
+            if got:
+                items.append(got)
+                hits += 1
+        day += _dt.timedelta(days=1)
+    note.append("커버리지 %d일 중 %d일에서 원문 확인 (200 + 본문 확인된 URL만 채택)"
+                % ((end.date() - start.date()).days + 1, hits))
+    if items:
+        return items, attempts, "Checked — usable articles found", note
+    return items, attempts, "Checked — no significant news", note
+
+
+def fetch_article_from_html(html, url, day):
+    import datetime as _dt
+    title = ""
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    if m:
+        title = re.sub(r"\s*[|<>-]\s*[^|]{0,40}$", "",
+                       C.strip_tags(m.group(1))).strip()
+    # 기관 페이지는 <title> 이 기관명뿐인 경우가 많다 — 본문 제목(h1~h3)을 쓴다.
+    h = re.search(r"<h[1-3][^>]*>(.*?)</h[1-3]>", html, re.I | re.S)
+    if h:
+        head = C.strip_tags(h.group(1)).strip()
+        if len(head) > len(title):
+            title = head
+    if not title:
+        return None
+    title = C.truncate(title, 140)
+    when = extract_published(html) or _dt.datetime(
+        day.year, day.month, day.day, 12, 0, tzinfo=C.KST)
+    return {"title": title, "url": url, "published": when,
+            "excerpt": make_excerpt(title, html), "dated": True}
 
 
 # ── main ─────────────────────────────────────────────────────────
@@ -415,6 +785,8 @@ def main():
         log("── %s (%s/%s)" % (src["name"], src["axis"], src["kind"]))
         if src["kind"] == "feed":
             raw, attempts, status, note = collect_feed(src, start, end)
+        elif src["kind"] == "datescan":
+            raw, attempts, status, note = collect_datescan(src, start, end)
         else:
             raw, attempts, status, note = collect_list(src, start, end)
 
