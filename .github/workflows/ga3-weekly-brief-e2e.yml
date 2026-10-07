@@ -61,7 +61,10 @@ jobs:
 
     env:
       PIPE: 04_PIPELINE
-      OUT: ${{ runner.temp }}/ga3-out
+      # 산출물 경로(OUT)는 job-level env 에서 만들지 않는다 — 이 위치에서는
+      # runner 컨텍스트를 쓸 수 없다(Startup failure). 첫 step 에서 기본 환경변수
+      # $RUNNER_TEMP 로 만들어 $GITHUB_ENV 에 넣고, 이후 step 들이 ${OUT} 으로 쓴다.
+      OUT_NAME: ga3-out
       WEEKLY_ID: ${{ inputs.weekly_id }}
       # 저장소 안에 __pycache__ 가 생기지 않게 한다 (마지막 무변경 Guard 보호).
       PYTHONDONTWRITEBYTECODE: "1"
@@ -73,7 +76,10 @@ jobs:
       - name: Runner fingerprint
         run: |
           set -uo pipefail
+          # 산출물 경로를 여기서 확정해 이후 step 전체에 넘긴다 (저장소 밖).
+          OUT="${RUNNER_TEMP}/${OUT_NAME}"
           mkdir -p "${OUT}"
+          echo "OUT=${OUT}" >> "$GITHUB_ENV"
           {
             echo "## GA-3 Weekly Brief E2E"
             echo ""
@@ -319,15 +325,18 @@ jobs:
           name: ga3-${{ inputs.weekly_id }}-output
           if-no-files-found: warn
           retention-days: 30
+          # OUT 은 첫 step 이 $GITHUB_ENV 로 넘긴 값이다 (runner 컨텍스트를 쓰지 않는다).
           path: |
-            ${{ runner.temp }}/ga3-out/*.md
-            ${{ runner.temp }}/ga3-out/*.html
-            ${{ runner.temp }}/ga3-out/*.json
+            ${{ env.OUT }}/*.md
+            ${{ env.OUT }}/*.html
+            ${{ env.OUT }}/*.json
 
       - name: Guard — 저장소·기준선 무변경 확인
         if: always()
         run: |
           set -uo pipefail
+          # 첫 step 이 실패해 OUT 이 안 넘어온 경우에도 이 Guard 는 돌아야 한다.
+          OUT="${OUT:-${RUNNER_TEMP}/${OUT_NAME}}"
           cd "${GITHUB_WORKSPACE}"
           echo "git status --porcelain:"
           git status --porcelain | tee /tmp/ga3_status.txt
