@@ -192,10 +192,16 @@ jobs:
           grep -qF 'min(int(budget), HARD_CAP)' gemini_client.py || fail "예산이 HARD_CAP 으로 제한되지 않는다."
           echo "  -> OK"
 
-          echo "== 재시도 허용 범위 (503 / 429 분당 한도만)"
-          grep -qF 'return category in ("SERVICE_UNAVAILABLE_503", "QUOTA_EXCEEDED_PER_MINUTE")' gemini_client.py \
-            || fail "재시도 허용 범위가 503 · 429(분당)로 한정되어 있지 않다."
-          echo "  -> OK"
+          echo "== 재시도 허용 범위 (503 / 429 분당 한도 / 요청 Timeout 만)"
+          grep -qF 'return category in ("SERVICE_UNAVAILABLE_503", "QUOTA_EXCEEDED_PER_MINUTE",' gemini_client.py \
+            || fail "재시도 허용 범위 선언을 찾지 못했다."
+          grep -qF '"TRANSIENT_TIMEOUT")' gemini_client.py \
+            || fail "TRANSIENT_TIMEOUT 이 재시도 대상에 없다."
+          N=$(grep -cE '^\s+return category in \(' gemini_client.py || true)
+          [ "$N" -eq 1 ] || fail "재시도 허용 범위 선언이 1곳이 아니다 (${N}건)."
+          grep -qE '^TIMEOUT = 1[2-9][0-9]' gemini_client.py \
+            || fail "단일 요청 timeout 이 120초 미만이다."
+          echo "  -> OK (timeout=$(grep -oE '^TIMEOUT = [0-9]+' gemini_client.py | grep -oE '[0-9]+')s)"
 
           echo "== 모델 ID 하드코딩 / Fallback 자동 전환"
           if grep -nE "[\"']gemini-[0-9]" *.py; then

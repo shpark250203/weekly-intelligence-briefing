@@ -209,6 +209,9 @@ def collect_qa(collected, analysis, md, html):
             usage.get("max_attempts_per_stage"), usage.get("backoff_schedule"))),
         ("B2", "마지막 HTTP status / final category", "%s / %s"
          % (usage.get("last_http_status"), usage.get("final_category") or "OK")),
+        ("B3", "timeout seconds / backoff history", "%s초 / %s"
+         % (usage.get("timeout_seconds"),
+            usage.get("backoff_waits") or "없음")),
         ("C", "Fallback 모델 사용", "NO"),
         ("D", "숫자 검증 삭제(미검증 수치)", str(numbers_removed)),
         ("E", "Signal 강등(조건 미달)", str(analysis["verification"]["signals_demoted"])),

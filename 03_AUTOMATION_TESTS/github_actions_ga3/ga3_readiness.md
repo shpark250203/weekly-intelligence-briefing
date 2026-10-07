@@ -188,6 +188,7 @@ GA-3는 발송을 검증하는 단계가 아니다 — 그것은 GA-2C에서 이
 |---|---|
 | 2026-10-01 | 최초 작성. GA-2C PASS 기록 후 GA-3 준비 상태·블로커 2건·권고 순서 정리. **GA-3 미실행** |
 | 2026-10-01 | 순서 A 착수 — STEP 12 Gemini 프로브 workflow 신설(`gemini-probe.yml`). **미실행.** 블로커 ②(파이프라인 코드 0건)는 그대로 |
+| 2026-10-07 | Dry Run 4회차: STEP 2 `UNEXPECTED_TimeoutError` → `TRANSIENT_TIMEOUT` 분류 신설 + 503·429와 동일 재시도(60→120초, 3회). timeout 180초는 권고선 이상이라 유지. **§8-9 참조. 재실행 대기** |
 | 2026-10-07 | Dry Run 3회차: C2·C3·C5 FAIL 진단 → 원인은 "최신 목록만 수집"(커버리지 3주 전). 수집기에 커버리지 페이지 탐색·Tier 1 datescan·피드 페이지네이션 추가. 실제 W38 수집 126건 + QA dry test Critical 전부 PASS. **§8-8 참조. 재실행 대기** |
 | 2026-10-07 | Dry Run 2회 503 실패 → Gemini 재시도 backoff 개정(단계당 3회 시도 · 60→120초). **§8-7 참조. 재실행 대기** |
 | 2026-10-07 | STEP 12 PASS(`gemini-3.8-flash`) 확인 → 블로커 ① 해소. 파이프라인 9개 모듈 + GA-3 workflow 신설로 블로커 ② 해소. 발송 정책을 `[TEST]` 1통(사용자 확인 입력 필수)으로 확정. **§8 참조. GA-3 자체는 아직 미실행** |
@@ -400,3 +401,55 @@ Guard 정적검사 exit 0, workflow YAML 검증 OK.
   **현재 주차 실행(GA-4)에서는 1페이지로 충족된다.**
 - **Beauty Source concentration**: 실제 반영이 코스인코리아·코스모닝에 쏠려
   `SOURCE CONCENTRATION WARNING` 이 뜰 수 있다 (Non-Critical, QA 에 기록).
+
+### 8-9. Dry Run 4회차 — 요청 Timeout 분류·재시도 (2026-10-07)
+
+수집은 정상이었다(기사 119 / 중복 제거 85 / 신제품 후보 6). 실패는 STEP 2 한 지점이다.
+
+| 관측값 | 값 |
+|---|---|
+| attempt count | **1** |
+| retry count | **0** |
+| last HTTP status | **None** (응답 자체를 받지 못함) |
+| final category | **`UNEXPECTED_TimeoutError`** |
+| Brief 생성 | 없음 (FAIL CLOSED 정상 동작) |
+
+#### 원인
+
+`urlopen(timeout=180)` 이 **180초 안에 응답을 받지 못해** `TimeoutError` 를 던졌다.
+기존 코드는 이 예외를 분류 목록에 두지 않아 `UNEXPECTED_*` 로 떨어졌고,
+`UNEXPECTED_*` 는 재시도 대상이 아니므로 **1회 시도 후 즉시 중단**했다.
+
+**timeout 값이 짧아서 생긴 문제가 아니다.** HTTP status 가 아예 없고(응답 0바이트)
+직전 회차의 503 과부하와 같은 계열의 **공급자 측 지연**으로 보인다.
+단일 요청 상한은 이미 **180초**로 권고선(120초) 이상이므로 **임의로 늘리지 않았다**
+(사용자 지시 3번). 늘리는 대신 **분류 + 재시도**로 흡수한다.
+
+#### 수정 (gemini_client 분류·재시도만. 수집·QA·Gmail·send gate·호출 상한 무수정)
+
+| 항목 | 이전 | **현재** |
+|---|---|---|
+| Timeout 분류 | `UNEXPECTED_TimeoutError` | **`TRANSIENT_TIMEOUT`** (read/socket timeout, `URLError(timed out)` 포함) |
+| 재시도 대상 | 503 · 429(분당) | **503 · 429(분당) · TRANSIENT_TIMEOUT** — 이 3종뿐 |
+| backoff | 60초 → 120초 | **동일** |
+| 단계당 시도 | 3회 | **동일** |
+| 단일 요청 timeout | 180초 | **180초 (변경 없음)** |
+| 그 밖의 오류 | 즉시 Fail Closed | **동일** (network·400·403·500·스키마 위반 등) |
+
+Summary·QA 에 **attempt count / retry count / 마지막 HTTP status / final category /
+timeout seconds / backoff history** 를 성공·실패 양쪽 경로에 표시한다.
+
+#### 검증
+
+selftest **143 PASS / 0 FAIL** — 신규 시나리오 포함:
+Timeout 2회 후 3번째 성공(재시도 2·backoff 60/120) · Timeout 3회 → Fail Closed ·
+`URLError(timed out)` 도 같은 분류 · timeout 아닌 네트워크 오류는 1회로 중단 ·
+재시도 허용 목록이 정확히 3종 · timeout seconds 노출 · TIMEOUT ≥ 120.
+Guard 정적검사 exit 0(재시도 목록·timeout 하한 검사 추가), workflow YAML 검증 OK,
+실제 W38 수집 데이터 기반 QA dry test 는 **Critical 전부 PASS / decision=SEND_TEST** 유지.
+
+#### 다음에도 Timeout 이 반복되면 (아직 적용하지 않은 선택지)
+
+호출 입력을 줄이는 쪽을 검토한다 — 1호출 입력 상한(`PACK_CHAR_BUDGET` 90K자)과
+작성 단계 `maxOutputTokens`(24,576)를 낮추면 생성 시간이 줄어든다.
+**품질 기준(W38)과 호출 수 설계를 건드리는 변경이므로 사용자 승인 후에만 한다.**

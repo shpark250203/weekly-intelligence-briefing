@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import tempfile
+import json
 import re
 import urllib.error
 
@@ -572,6 +573,105 @@ def test_retry_loop():
               u["attempts"] == 3 and u["retries"] == 2
               and u["last_http_status"] == 503
               and u["final_category"] == "SERVICE_UNAVAILABLE_503")
+
+        # ── Timeout: 재시도 → 성공 ──────────────────────────────
+        slept.clear()
+        c_ok = G.GeminiClient(pace=0)
+        attempts = {"n": 0}
+
+        def flaky_post(payload):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise TimeoutError("timed out")
+            return 200, json.dumps({
+                "candidates": [{"finishReason": "STOP", "content": {
+                    "parts": [{"text": '{"ok": true}'}]}}],
+                "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1,
+                                  "totalTokenCount": 2},
+            })
+
+        c_ok._post = flaky_post
+        out = c_ok.generate("t_timeout_ok", "i", "[]", {"type": "OBJECT"})
+        check("Timeout 2회 뒤 3번째 시도에서 성공", out == {"ok": True}, str(out))
+        check("Timeout 재시도 횟수 2 / 시도 3",
+              c_ok.retries == 2 and c_ok.attempts == 3,
+              "attempts=%d retries=%d" % (c_ok.attempts, c_ok.retries))
+        check("Timeout backoff 도 60초 -> 120초",
+              c_ok.backoff_waits == [60, 120] and slept == [60, 120],
+              str(c_ok.backoff_waits))
+        check("성공 후 final category 는 비어 있다",
+              c_ok.usage()["final_category"] is None,
+              str(c_ok.usage()["final_category"]))
+        check("usage 에 timeout seconds 노출",
+              c_ok.usage()["timeout_seconds"] == G.TIMEOUT,
+              str(c_ok.usage().get("timeout_seconds")))
+        check("단일 요청 timeout 은 120초 이상", G.TIMEOUT >= 120, str(G.TIMEOUT))
+
+        # ── Timeout 3회 → Fail Closed ──────────────────────────
+        slept.clear()
+        c_to = G.GeminiClient(pace=0)
+
+        def always_timeout(payload):
+            raise TimeoutError("timed out")
+
+        c_to._post = always_timeout
+        err_to = None
+        try:
+            c_to.generate("t_timeout_fail", "i", "[]", {"type": "OBJECT"})
+        except G.GeminiFailClosed as exc:
+            err_to = exc
+        check("Timeout 3회면 Fail Closed",
+              err_to is not None and err_to.category == "TRANSIENT_TIMEOUT",
+              err_to and err_to.category)
+        check("Timeout 3회 시도 후 중단",
+              c_to.attempts == 3 and c_to.retries == 2,
+              "attempts=%d retries=%d" % (c_to.attempts, c_to.retries))
+        check("Timeout 분류가 TRANSIENT_TIMEOUT",
+              c_to.last_category == "TRANSIENT_TIMEOUT", c_to.last_category)
+        check("Timeout 은 HTTP status 가 없다", c_to.last_http_status is None)
+        check("TRANSIENT_TIMEOUT 은 재시도 대상",
+              G.GeminiClient._retryable("TRANSIENT_TIMEOUT"))
+        check("재시도 대상은 503 / 429 분당 / TRANSIENT_TIMEOUT 3종뿐",
+              [cat for cat in ("SERVICE_UNAVAILABLE_503",
+                               "QUOTA_EXCEEDED_PER_MINUTE", "TRANSIENT_TIMEOUT",
+                               "QUOTA_EXCEEDED_PER_DAY", "QUOTA_EXCEEDED_UNKNOWN",
+                               "NETWORK_ERROR", "SERVER_ERROR_500",
+                               "BAD_REQUEST_400", "AUTH_FORBIDDEN",
+                               "MODEL_NOT_FOUND", "API_KEY_INVALID",
+                               "STRUCTURED_OUTPUT_PARSE_FAILED")
+               if G.GeminiClient._retryable(cat)]
+              == ["SERVICE_UNAVAILABLE_503", "QUOTA_EXCEEDED_PER_MINUTE",
+                  "TRANSIENT_TIMEOUT"])
+
+        # 연결 단계 timeout(URLError) 도 같은 분류여야 한다
+        c_url = G.GeminiClient(pace=0)
+
+        def url_timeout(payload):
+            raise urllib.error.URLError(TimeoutError("timed out"))
+
+        c_url._post = url_timeout
+        try:
+            c_url.generate("t_urltimeout", "i", "[]", {"type": "OBJECT"})
+        except G.GeminiFailClosed:
+            pass
+        check("URLError(timed out) 도 TRANSIENT_TIMEOUT 으로 분류",
+              c_url.last_category == "TRANSIENT_TIMEOUT", c_url.last_category)
+        check("URLError timeout 도 3회 시도", c_url.attempts == 3,
+              str(c_url.attempts))
+
+        c_net = G.GeminiClient(pace=0)
+
+        def net_down(payload):
+            raise urllib.error.URLError("Name or service not known")
+
+        c_net._post = net_down
+        try:
+            c_net.generate("t_net", "i", "[]", {"type": "OBJECT"})
+        except G.GeminiFailClosed:
+            pass
+        check("timeout 이 아닌 네트워크 오류는 재시도 없이 1회",
+              c_net.last_category == "NETWORK_ERROR" and c_net.attempts == 1,
+              "%s / attempts=%d" % (c_net.last_category, c_net.attempts))
 
         for code, label in ((400, "400"), (403, "403"), (500, "500")):
             c = G.GeminiClient(pace=0)

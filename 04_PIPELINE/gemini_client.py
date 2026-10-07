@@ -6,13 +6,21 @@
   권고 상한      : 8 호출 (재시도 1회 포함)
   절대 상한      : 10 호출 — HARD_CAP. 초과 요청은 호출 전에 거부한다.
 
-재시도 (2026-10-07 개정 — 503 과부하 2회 연속 실패 대응)
-  HTTP 503            → 재시도. 1차 실패 후 **60초**, 2차 실패 후 **120초** 대기
-  HTTP 429 (분당 한도) → 같은 backoff. 서버가 준 retryDelay 가 더 길면 그쪽을 따른다
-  HTTP 429 (일일 RPD) → **재시도 금지. 즉시 중단** — 오늘은 회복되지 않는다
-  그 외 모든 오류      → **재시도 금지. 즉시 Fail Closed**
+재시도 (2026-10-07 개정 — 503 과부하, 이어서 요청 Timeout 대응)
+  HTTP 503             → 재시도. 1차 실패 후 **60초**, 2차 실패 후 **120초** 대기
+  HTTP 429 (분당 한도)  → 같은 backoff. 서버가 준 retryDelay 가 더 길면 그쪽을 따른다
+  **TRANSIENT_TIMEOUT** → 같은 backoff. 요청이 TIMEOUT(초) 안에 응답을 받지 못한 경우
+                          (socket/read/connect timeout). 응답을 못 받은 것이지
+                          요청이 거부된 것이 아니므로 일시적 장애로 본다
+  HTTP 429 (일일 RPD)   → **재시도 금지. 즉시 중단** — 오늘은 회복되지 않는다
+  그 외 모든 오류       → **재시도 금지. 즉시 Fail Closed**
   **단계당 최대 3회 시도(재시도 2회)**, 실행당 재시도 총 3회.
   재시도도 호출 1건으로 세며 HARD_CAP 10 을 넘지 못한다 (7 + 3 = 10).
+
+단일 요청 timeout (TIMEOUT)
+  **180초.** 2026-10-07 Dry Run 의 `UNEXPECTED_TimeoutError` 는 이 값이 짧아서가
+  아니라 **180초 안에 응답이 오지 않아서** 난 것이다. 권고 기준(120초)보다 이미 길므로
+  **임의로 더 늘리지 않는다.** 대신 위 분류·재시도로 흡수한다.
 
 금지
   - 모델 ID 하드코딩 (Repository Variable GEMINI_MODEL 로만 주입)
@@ -35,7 +43,7 @@ import common as C  # noqa: E402
 ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
 )
-TIMEOUT = 180
+TIMEOUT = 180   # 단일 요청 상한(초). 권고 120 이상 — 임의로 늘리지 않는다
 HARD_CAP = 10
 TARGET_CALLS = 7
 RECOMMENDED_CAP = 8
@@ -124,7 +132,8 @@ class GeminiClient:
 
     @staticmethod
     def _retryable(category):
-        return category in ("SERVICE_UNAVAILABLE_503", "QUOTA_EXCEEDED_PER_MINUTE")
+        return category in ("SERVICE_UNAVAILABLE_503", "QUOTA_EXCEEDED_PER_MINUTE",
+                            "TRANSIENT_TIMEOUT")
 
     @staticmethod
     def _retry_delay(text):
@@ -187,12 +196,26 @@ class GeminiClient:
             category = self._classify(e.code, body)
             self.last_category = category
             raise GeminiFailClosed(category, self._sanitize(body))
+        except TimeoutError as e:
+            # socket.timeout 은 3.10+ 에서 TimeoutError 와 같은 예외다.
+            # 응답을 못 받은 것이지 요청이 거부된 것이 아니다 → 일시적 장애로 본다.
+            self.last_http_status = None
+            self.last_category = "TRANSIENT_TIMEOUT"
+            raise GeminiFailClosed(
+                "TRANSIENT_TIMEOUT",
+                "request timed out after %ds (%s)" % (TIMEOUT, type(e).__name__),
+            )
         except urllib.error.URLError as e:
             self.last_http_status = None
+            reason = getattr(e, "reason", "")
+            if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+                self.last_category = "TRANSIENT_TIMEOUT"
+                raise GeminiFailClosed(
+                    "TRANSIENT_TIMEOUT",
+                    "connection timed out after %ds" % TIMEOUT,
+                )
             self.last_category = "NETWORK_ERROR"
-            raise GeminiFailClosed(
-                "NETWORK_ERROR", self._sanitize(getattr(e, "reason", ""))
-            )
+            raise GeminiFailClosed("NETWORK_ERROR", self._sanitize(reason))
         except Exception as e:
             self.last_category = "UNEXPECTED_" + type(e).__name__
             raise GeminiFailClosed(self.last_category)
@@ -293,6 +316,7 @@ class GeminiClient:
             "retries": self.retries,
             "last_http_status": self.last_http_status,
             "final_category": self.last_category,
+            "timeout_seconds": TIMEOUT,
             "backoff_waits": self.backoff_waits,
             "max_attempts_per_stage": MAX_ATTEMPTS_PER_STAGE,
             "backoff_schedule": list(BACKOFF_SECONDS),
