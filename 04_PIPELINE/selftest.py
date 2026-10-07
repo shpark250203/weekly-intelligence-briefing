@@ -545,7 +545,7 @@ def test_retry_loop():
     G.time.sleep = lambda s: slept.append(s)   # 셀프테스트는 실제로 대기하지 않는다
     try:
         def raiser(code):
-            def _post(payload):
+            def _post(payload, model=None):
                 raise urllib.error.HTTPError("https://x", code, "err", {}, None)
             return _post
 
@@ -579,7 +579,7 @@ def test_retry_loop():
         c_ok = G.GeminiClient(pace=0)
         attempts = {"n": 0}
 
-        def flaky_post(payload):
+        def flaky_post(payload, model=None):
             attempts["n"] += 1
             if attempts["n"] < 3:
                 raise TimeoutError("timed out")
@@ -611,7 +611,7 @@ def test_retry_loop():
         slept.clear()
         c_to = G.GeminiClient(pace=0)
 
-        def always_timeout(payload):
+        def always_timeout(payload, model=None):
             raise TimeoutError("timed out")
 
         c_to._post = always_timeout
@@ -646,7 +646,7 @@ def test_retry_loop():
         # 연결 단계 timeout(URLError) 도 같은 분류여야 한다
         c_url = G.GeminiClient(pace=0)
 
-        def url_timeout(payload):
+        def url_timeout(payload, model=None):
             raise urllib.error.URLError(TimeoutError("timed out"))
 
         c_url._post = url_timeout
@@ -661,7 +661,7 @@ def test_retry_loop():
 
         c_net = G.GeminiClient(pace=0)
 
-        def net_down(payload):
+        def net_down(payload, model=None):
             raise urllib.error.URLError("Name or service not known")
 
         c_net._post = net_down
@@ -697,6 +697,143 @@ def test_retry_loop():
     finally:
         G.time.sleep = real_sleep
         for key in ("GEMINI_API_KEY", "GEMINI_MODEL"):
+            os.environ.pop(key, None)
+
+
+# ── 5-B. 모델 Fallback (PRIMARY -> FALLBACK, 실제 호출 없음) ────
+def ok_response():
+    return 200, json.dumps({
+        "candidates": [{"finishReason": "STOP",
+                        "content": {"parts": [{"text": '{"ok": true}'}]}}],
+        "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1,
+                          "totalTokenCount": 2},
+    })
+
+
+def test_model_fallback():
+    os.environ["GEMINI_API_KEY"] = "selftest-not-a-real-key"
+    os.environ["GEMINI_MODEL"] = "selftest-primary"
+    os.environ["GEMINI_MODEL_FALLBACK"] = "selftest-fallback"
+    os.environ.pop("AI_CALL_BUDGET", None)
+    real_sleep = G.time.sleep
+    slept = []
+    G.time.sleep = lambda s: slept.append(s)
+    try:
+        def http_err(code):
+            return urllib.error.HTTPError("https://x", code, "err", {}, None)
+
+        def script(seq):
+            """모델별로 미리 정한 결과를 돌려준다. 호출된 모델을 기록한다."""
+            used = []
+
+            def _post(payload, model=None):
+                used.append(model)
+                action = seq.pop(0) if seq else "ok"
+                if action == "ok":
+                    return ok_response()
+                raise http_err(action)
+
+            return _post, used
+
+        # A. PRIMARY 1회 성공 — fallback 건드리지 않는다
+        ca = G.GeminiClient(pace=0)
+        post, used = script(["ok"])
+        ca._post = post
+        out = ca.generate("A", "i", "[]", {"type": "OBJECT"})
+        ua = ca.usage()
+        check("A: 3.8(primary) 1회 성공", out == {"ok": True} and ca.attempts == 1)
+        check("A: 사용 모델 = primary", ua["model_used"] == "selftest-primary",
+              ua["model_used"])
+        check("A: fallback triggered NO",
+              ua["fallback_triggered"] is False and ua["fallback_attempts"] == 0)
+        check("A: primary attempts 1", ua["primary_attempts"] == 1)
+
+        # B. PRIMARY 503 → 60초 후 PRIMARY 재시도 성공
+        slept.clear()
+        cb = G.GeminiClient(pace=0)
+        post, used = script([503, "ok"])
+        cb._post = post
+        out = cb.generate("B", "i", "[]", {"type": "OBJECT"})
+        ub = cb.usage()
+        check("B: 503 후 primary 재시도 성공", out == {"ok": True})
+        check("B: 두 번 다 primary 모델", used == ["selftest-primary"] * 2, str(used))
+        check("B: 60초만 대기", slept == [60], str(slept))
+        check("B: fallback triggered NO",
+              ub["fallback_triggered"] is False and ub["primary_attempts"] == 2)
+
+        # C. PRIMARY 503 2회 → FALLBACK 1회 성공
+        slept.clear()
+        cc = G.GeminiClient(pace=0)
+        post, used = script([503, 503, "ok"])
+        cc._post = post
+        out = cc.generate("C", "i", "[]", {"type": "OBJECT"})
+        uc = cc.usage()
+        check("C: 503 2회 후 fallback 성공", out == {"ok": True})
+        check("C: 3번째 호출만 fallback 모델",
+              used == ["selftest-primary", "selftest-primary", "selftest-fallback"],
+              str(used))
+        check("C: backoff 60 -> 120", slept == [60, 120], str(slept))
+        check("C: fallback triggered YES", uc["fallback_triggered"] is True)
+        check("C: primary 2회 / fallback 1회",
+              uc["primary_attempts"] == 2 and uc["fallback_attempts"] == 1)
+        check("C: 사용 모델 = fallback", uc["model_used"] == "selftest-fallback",
+              uc["model_used"])
+        check("C: 총 호출 3 (상한 10 이내)",
+              cc.calls == 3 and cc.calls <= G.HARD_CAP)
+
+        # D. PRIMARY 실패 → FALLBACK 도 실패 → Fail Closed
+        slept.clear()
+        cd = G.GeminiClient(pace=0)
+        post, used = script([503, 503, 503])
+        cd._post = post
+        err = None
+        try:
+            cd.generate("D", "i", "[]", {"type": "OBJECT"})
+        except G.GeminiFailClosed as exc:
+            err = exc
+        ud = cd.usage()
+        check("D: fallback 도 실패하면 Fail Closed",
+              err is not None and err.category == "SERVICE_UNAVAILABLE_503",
+              err and err.category)
+        check("D: 시도 3회로 멈춘다 (primary 2 + fallback 1)",
+              ud["attempts"] == 3 and ud["primary_attempts"] == 2
+              and ud["fallback_attempts"] == 1)
+        check("D: fallback triggered YES (실패했어도 기록)",
+              ud["fallback_triggered"] is True)
+        check("D: final HTTP status 503", ud["last_http_status"] == 503)
+
+        # E. non-transient 는 fallback 하지 않는다
+        for code, cat in ((400, "BAD_REQUEST_400"), (401, "AUTH_FORBIDDEN"),
+                          (403, "AUTH_FORBIDDEN"), (404, "MODEL_NOT_FOUND")):
+            ce = G.GeminiClient(pace=0)
+            post, used = script([code, "ok"])
+            ce._post = post
+            try:
+                ce.generate("E%d" % code, "i", "[]", {"type": "OBJECT"})
+            except G.GeminiFailClosed:
+                pass
+            ue = ce.usage()
+            check("E: HTTP %d 는 fallback 없이 즉시 중단" % code,
+                  ue["fallback_triggered"] is False and ue["attempts"] == 1
+                  and ue["final_category"] == cat,
+                  "%s / attempts=%d" % (ue["final_category"], ue["attempts"]))
+
+        # F. Fallback Variable 이 없으면 primary 로만 시도한다
+        os.environ.pop("GEMINI_MODEL_FALLBACK", None)
+        cf = G.GeminiClient(pace=0)
+        post, used = script([503, 503, "ok"])
+        cf._post = post
+        out = cf.generate("F", "i", "[]", {"type": "OBJECT"})
+        uf = cf.usage()
+        check("F: fallback 미설정이면 primary 로만 3회",
+              out == {"ok": True} and used == ["selftest-primary"] * 3, str(used))
+        check("F: fallback triggered NO / 미설정 표기",
+              uf["fallback_triggered"] is False
+              and uf["fallback_available"] is False
+              and uf["fallback_model"] == "(미설정)", uf["fallback_model"])
+    finally:
+        G.time.sleep = real_sleep
+        for key in ("GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_MODEL_FALLBACK"):
             os.environ.pop(key, None)
 
 
@@ -959,6 +1096,7 @@ def main():
     test_signal_and_price()
     test_budget()
     test_retry_loop()
+    test_model_fallback()
     test_build_qa_gate()
     print("")
     print("PASS %d / FAIL %d" % (len(PASS), len(FAIL)))

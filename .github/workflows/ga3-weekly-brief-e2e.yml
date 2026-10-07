@@ -203,14 +203,27 @@ jobs:
             || fail "단일 요청 timeout 이 120초 미만이다."
           echo "  -> OK (timeout=$(grep -oE '^TIMEOUT = [0-9]+' gemini_client.py | grep -oE '[0-9]+')s)"
 
-          echo "== 모델 ID 하드코딩 / Fallback 자동 전환"
+          echo "== 모델 ID 하드코딩 / Fallback 주입 경로"
           if grep -nE "[\"']gemini-[0-9]" *.py; then
-            fail "모델 ID 하드코딩이 발견되었다. Variable GEMINI_MODEL 로만 주입한다."
+            fail "모델 ID 하드코딩이 발견되었다. Variable 로만 주입한다."
           fi
-          if grep -nE '^[^#]*GEMINI_MODEL_FALLBACK' *.py; then
-            fail "Fallback 모델 사용 코드가 발견되었다. GA-3 는 Fallback 을 쓰지 않는다."
+          grep -qF 'os.environ.get("GEMINI_MODEL_FALLBACK", "")' gemini_client.py \
+            || fail "Fallback 모델이 Variable 로 주입되지 않는다."
+          echo "  -> 하드코딩 0건 / Fallback 은 Variable 주입"
+
+          echo "== Fallback 은 transient 실패에서만, 마지막 1회만"
+          grep -qF 'def _model_for_attempt(self, attempt):' gemini_client.py \
+            || fail "모델 선택 함수(_model_for_attempt)가 없다."
+          grep -qF 'if attempt >= MAX_RETRIES_PER_STAGE and self.fallback_model:' gemini_client.py \
+            || fail "Fallback 전환 조건(마지막 시도)이 없다."
+          N=$(grep -cF 'return self.fallback_model, True' gemini_client.py || true)
+          [ "$N" -eq 1 ] || fail "Fallback 모델을 돌려주는 지점이 1곳이 아니다 (${N}건)."
+          # 허용되는 사용처: 모델 선택 함수(조건·반환) / 초기화 / usage 보고 뿐이다.
+          if grep -nE '^[^#]*self\.fallback_model' gemini_client.py \
+             | grep -vE '_model_for_attempt|if attempt >= MAX_RETRIES_PER_STAGE and self\.fallback_model:|return self\.fallback_model, True|fallback_model = |"fallback_model"|bool\(self\.fallback_model\)|self\.fallback_model or'; then
+            fail "Fallback 모델을 쓰는 예상 밖 경로가 있다."
           fi
-          echo "  -> 0건"
+          echo "  -> OK"
 
           echo "== Secret·수신주소 출력"
           if grep -nE '^[^#]*(print|append|write)\(.*(api_key|\bpw\b|pw_raw)' *.py; then
@@ -262,6 +275,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK }}
           AI_CALL_BUDGET: ${{ vars.AI_CALL_BUDGET || '10' }}
         run: |
           set -uo pipefail
@@ -269,7 +283,10 @@ jobs:
             echo "::error::Repository Variable GEMINI_MODEL 이 비어 있다. 모델을 하드코딩하지 않는다."
             exit 1
           fi
-          echo "model=${GEMINI_MODEL} / budget=${AI_CALL_BUDGET}"
+          if [ -z "${GEMINI_MODEL_FALLBACK}" ]; then
+            echo "::warning::GEMINI_MODEL_FALLBACK Variable 이 비어 있다 — fallback 없이 PRIMARY 로만 시도한다."
+          fi
+          echo "primary=${GEMINI_MODEL} / fallback=${GEMINI_MODEL_FALLBACK:-(미설정)} / budget=${AI_CALL_BUDGET}"
           python3 -B "${GITHUB_WORKSPACE}/${PIPE}/analyze.py" \
             --collected "${OUT}/collected.json" \
             --out "${OUT}/analysis.json"

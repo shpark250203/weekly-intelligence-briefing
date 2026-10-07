@@ -188,6 +188,7 @@ GA-3는 발송을 검증하는 단계가 아니다 — 그것은 GA-2C에서 이
 |---|---|
 | 2026-10-01 | 최초 작성. GA-2C PASS 기록 후 GA-3 준비 상태·블로커 2건·권고 순서 정리. **GA-3 미실행** |
 | 2026-10-01 | 순서 A 착수 — STEP 12 Gemini 프로브 workflow 신설(`gemini-probe.yml`). **미실행.** 블로커 ②(파이프라인 코드 0건)는 그대로 |
+| 2026-10-07 | Dry Run 5회차: 3.8-flash 503 3회 연속 → 모델 Fallback 추가(PRIMARY 2회 → FALLBACK 1회, transient 한정). Variable `GEMINI_MODEL_FALLBACK` 필요. **§8-10 참조. 재실행 대기** |
 | 2026-10-07 | Dry Run 4회차: STEP 2 `UNEXPECTED_TimeoutError` → `TRANSIENT_TIMEOUT` 분류 신설 + 503·429와 동일 재시도(60→120초, 3회). timeout 180초는 권고선 이상이라 유지. **§8-9 참조. 재실행 대기** |
 | 2026-10-07 | Dry Run 3회차: C2·C3·C5 FAIL 진단 → 원인은 "최신 목록만 수집"(커버리지 3주 전). 수집기에 커버리지 페이지 탐색·Tier 1 datescan·피드 페이지네이션 추가. 실제 W38 수집 126건 + QA dry test Critical 전부 PASS. **§8-8 참조. 재실행 대기** |
 | 2026-10-07 | Dry Run 2회 503 실패 → Gemini 재시도 backoff 개정(단계당 3회 시도 · 60→120초). **§8-7 참조. 재실행 대기** |
@@ -453,3 +454,58 @@ Guard 정적검사 exit 0(재시도 목록·timeout 하한 검사 추가), workf
 호출 입력을 줄이는 쪽을 검토한다 — 1호출 입력 상한(`PACK_CHAR_BUDGET` 90K자)과
 작성 단계 `maxOutputTokens`(24,576)를 낮추면 생성 시간이 줄어든다.
 **품질 기준(W38)과 호출 수 설계를 건드리는 변경이므로 사용자 승인 후에만 한다.**
+
+### 8-10. Dry Run 5회차 — 모델 Fallback 추가 (2026-10-07)
+
+재시도 로직은 정상 작동했다(attempt 3 / retry 2 / backoff [60,120] / timeout 180초).
+그래도 `gemini-3.8-flash` 가 **3회 연속 503** 이었다 → 재시도 횟수를 더 늘리지 않고
+**모델 Fallback** 을 넣는다.
+
+| 단계 | 모델 | 대기 |
+|---|---|---|
+| 1차 시도 | **PRIMARY** (`GEMINI_MODEL`) | — |
+| 2차 시도 | **PRIMARY** | 60초 |
+| 3차 시도 | **FALLBACK** (`GEMINI_MODEL_FALLBACK`) | 120초 |
+| 그 뒤 | **Fail Closed** | — |
+
+- 전환 조건은 **transient 실패(503 / 429 분당 / TRANSIENT_TIMEOUT)뿐**이다.
+  non-transient(인증·400·401·403·404·스키마 위반 등)는 재시도 자체가 허용되지 않으므로
+  **모델을 바꿔 다시 쏘는 경로가 구조적으로 없다**(모델 선택은 `_model_for_attempt` 한 곳).
+- 호출 총량은 그대로 **HARD_CAP 10**. 단계당 3회 시도, 실행당 재시도 총 3회.
+- Fallback 성공 시 파이프라인은 그대로 계속되고, 사용 사실을 Summary·QA 에 남긴다.
+- **Variable 이 비어 있으면** fallback 없이 PRIMARY 로만 3회 시도하고 경고를 남긴다.
+
+#### 실행 전 사용자 작업 1건
+
+| 종류 | 이름 | 값 |
+|---|---|---|
+| Repository **Variable** | `GEMINI_MODEL_FALLBACK` | `gemini-3.7-flash` |
+
+모델 ID 는 코드에 하드코딩하지 않는다(설계 2-1). Guard 가 하드코딩 0건과
+Variable 주입 경로를 정적 검사한다.
+
+#### Summary / QA 표시 (추가)
+
+primary model · fallback model · **model actually used** · primary attempts ·
+fallback attempts · **fallback triggered YES/NO** · final HTTP status · final category
+(기존 attempt/retry/timeout/backoff history 유지).
+
+#### 검증 — selftest 168 PASS / 0 FAIL
+
+| 시나리오 | 결과 |
+|---|---|
+| A. 3.8 1회 성공 | 사용 모델 primary, fallback NO |
+| B. 3.8 503 → 60초 후 3.8 재시도 성공 | 두 호출 모두 primary, 대기 [60] |
+| C. 3.8 503 2회 → 3.7 성공 | 3번째만 fallback, 대기 [60,120], fallback YES, 총 3호출 |
+| D. 3.8 실패 → 3.7 실패 | **Fail Closed**, attempts 3(primary 2 + fallback 1), HTTP 503 |
+| E. 400·401·403·404 | fallback 없이 **1회 시도 후 중단** |
+| F. Variable 미설정 | primary 로만 3회, fallback NO·`(미설정)` 표기 |
+
+Guard 정적검사 exit 0(모델 선택 지점 1곳·하드코딩 0건·Variable 주입 확인),
+workflow YAML 검증 OK, 실제 W38 수집 데이터 QA dry test **Critical 전부 PASS /
+decision=SEND_TEST** 유지.
+
+> **품질 비교 주의** — 설계 `ga2_auth_design.md` §2-5 는 *Fallback 을 1회라도 쓴 실행은
+> §6 품질 비교 대상에서 제외*하라고 규정한다. 다른 모델의 출력을 기준선과 비교하면
+> 비교가 무의미해지기 때문이다. GA-3 가 fallback 으로 완주했다면
+> **"파이프라인 통과"로만 인정하고, W38 품질 판정은 PRIMARY 완주 실행으로 다시 한다.**

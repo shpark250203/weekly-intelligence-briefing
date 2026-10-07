@@ -212,7 +212,12 @@ def collect_qa(collected, analysis, md, html):
         ("B3", "timeout seconds / backoff history", "%s초 / %s"
          % (usage.get("timeout_seconds"),
             usage.get("backoff_waits") or "없음")),
-        ("C", "Fallback 모델 사용", "NO"),
+        ("C", "모델 (primary / fallback / 실사용)", "%s / %s / **%s**"
+         % (usage.get("primary_model"), usage.get("fallback_model"),
+            usage.get("model_used"))),
+        ("C2", "fallback triggered", "%s (primary %s회 / fallback %s회)"
+         % ("YES" if usage.get("fallback_triggered") else "NO",
+            usage.get("primary_attempts"), usage.get("fallback_attempts"))),
         ("D", "숫자 검증 삭제(미검증 수치)", str(numbers_removed)),
         ("E", "Signal 강등(조건 미달)", str(analysis["verification"]["signals_demoted"])),
         ("F", "규격 위반 교정(Price enum·Observation 혼입)",

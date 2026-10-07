@@ -755,6 +755,12 @@ def main():
         C.append_summary(
             "### STEP 2 — Gemini 분석: **FAIL CLOSED**\n\n"
             "| 항목 | 값 |\n|---|---|\n"
+            "| **primary model** | `%s` |\n"
+            "| **fallback model** | `%s` |\n"
+            "| **model actually used** | `%s` |\n"
+            "| **primary attempts** | %s |\n"
+            "| **fallback attempts** | %s |\n"
+            "| **fallback triggered** | **%s** |\n"
             "| **Gemini attempt count** | **%s** |\n"
             "| **retry count** | **%s** (단계당 최대 %s회 시도, backoff %s초) |\n"
             "| **마지막 HTTP status** | **%s** |\n"
@@ -763,7 +769,11 @@ def main():
             "| **backoff history** | %s |\n"
             "| 소모한 호출 수 | %s / 예산 %s (절대 상한 %s) |\n"
             "| Brief 생성·발송 | **없음** |\n"
-            % (usage.get("attempts"), usage.get("retries"),
+            % (usage.get("primary_model"), usage.get("fallback_model"),
+               usage.get("model_used"), usage.get("primary_attempts"),
+               usage.get("fallback_attempts"),
+               "YES" if usage.get("fallback_triggered") else "NO",
+               usage.get("attempts"), usage.get("retries"),
                usage.get("max_attempts_per_stage"),
                usage.get("backoff_schedule"), usage.get("last_http_status"),
                usage.get("final_category") or category,
@@ -782,7 +792,12 @@ def main():
     C.append_summary(
         "### STEP 2 — Gemini 분석\n\n"
         "| 항목 | 값 |\n|---|---|\n"
-        "| 모델 | `%s` |\n"
+        "| **primary model** | `%s` |\n"
+        "| **fallback model** | `%s` |\n"
+        "| **model actually used** | **`%s`** |\n"
+        "| **primary attempts** | %d |\n"
+        "| **fallback attempts** | %d |\n"
+        "| **fallback triggered** | **%s** |\n"
         "| **Gemini attempt count** | **%d** |\n"
         "| **retry count** | **%d** (단계당 최대 %d회 시도, backoff %s초) |\n"
         "| **마지막 HTTP status** | **%s** |\n"
@@ -791,16 +806,19 @@ def main():
         "| **backoff history** | %s |\n"
         "| 호출 수 | **%d** / 예산 %d (절대 상한 %d) |\n"
         "| 토큰 (in/out/total) | %d / %d / %d |\n"
-        "| Fallback 모델 사용 | %s |\n| 2-of-5 미달 제외 | %d |\n"
+        "| 2-of-5 미달 제외 | %d |\n"
         "| 숫자 검증 삭제 | %d |\n| Signal 강등 | %d |\n| 규격 위반 교정 | %d |\n"
         "| MUST KNOW | %d |\n| 신제품 KR/US/JP | %d / %d / %d |\n"
-        % (u["model"], u["attempts"], u["retries"],
+        % (u["primary_model"], u["fallback_model"], u["model_used"],
+           u["primary_attempts"], u["fallback_attempts"],
+           "YES" if u["fallback_triggered"] else "NO",
+           u["attempts"], u["retries"],
            u["max_attempts_per_stage"], u["backoff_schedule"],
            u["last_http_status"], u["final_category"] or "OK",
            u.get("timeout_seconds"), u["backoff_waits"] or "없음",
            u["calls"], u["budget"], u["hard_cap"],
            u["tokens_in"], u["tokens_out"], u["tokens_total"],
-           "NO", stats["excluded_by_rule"], stats["numbers_removed"],
+           stats["excluded_by_rule"], stats["numbers_removed"],
            stats["signals_demoted"], stats["spec_violations"],
            len(result["must_know"]), len(result["products"].get("KR", [])),
            len(result["products"].get("US", [])),
