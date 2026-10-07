@@ -9,7 +9,7 @@ workflow 의 첫 단계에서 돌린다. 여기서 깨지면 수집도 Gemini �
   2 Noise 규칙 · 중복 클러스터링
   3 2-of-5 Rule 집행 · 숫자 검증 삭제
   4 Trend Signal 조건 A·B · Confidence 상한 · Price enum
-  5 Gemini 호출 예산 상한 · 재시도 허용 범위 (호출은 하지 않는다)
+  5 Gemini 호출 예산 상한 · 재시도 범위·backoff (실제 호출·대기 없음)
   6 Brief·Email 조립 · QA Critical 판정
   7 발송 Gate 의 FAIL CLOSED 3경로 (QA FAIL / 확인문자열 불일치 / 정상)
 """
@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import tempfile
+import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import analyze  # noqa: E402
@@ -291,8 +292,23 @@ def test_budget():
     check("예산 8 설정은 그대로 적용", client8.budget == 8, str(client8.budget))
     check("목표 호출 수 7 / 권고 상한 8",
           G.TARGET_CALLS == 7 and G.RECOMMENDED_CAP == 8)
-    check("단계당 재시도 1회 / 실행당 총 3회",
-          G.MAX_RETRIES_PER_STAGE == 1 and G.MAX_RETRIES_TOTAL == 3)
+    check("단계당 최대 3회 시도(재시도 2회) / 실행당 재시도 총 3회",
+          G.MAX_ATTEMPTS_PER_STAGE == 3 and G.MAX_RETRIES_PER_STAGE == 2
+          and G.MAX_RETRIES_TOTAL == 3)
+    check("backoff 스케줄 60초 -> 120초", G.BACKOFF_SECONDS == (60, 120),
+          str(G.BACKOFF_SECONDS))
+    check("1차 재시도 대기 60초",
+          G.GeminiClient.backoff_for(0, "SERVICE_UNAVAILABLE_503") == 60)
+    check("2차 재시도 대기 120초",
+          G.GeminiClient.backoff_for(1, "SERVICE_UNAVAILABLE_503") == 120)
+    check("backoff 상한 180초 초과 없음",
+          G.GeminiClient.backoff_for(
+              1, "QUOTA_EXCEEDED_PER_MINUTE", '"retryDelay": "600s"') <= 180)
+    check("429 분당 한도에서 서버 retryDelay 가 더 길면 그쪽을 따른다",
+          G.GeminiClient.backoff_for(
+              0, "QUOTA_EXCEEDED_PER_MINUTE", '"retryDelay": "90s"') > 60)
+    check("재시도 2회 + 정상 7호출이 절대 상한 10 안에 들어간다",
+          G.TARGET_CALLS + G.MAX_RETRIES_TOTAL == G.HARD_CAP)
 
     client8.calls = 8
     budget_blocked = False
@@ -321,10 +337,78 @@ def test_budget():
     check("429 본문이 PerMinute 면 분당 한도로 분류",
           cl._classify(429, '{"quotaId":"GenerateRequestsPerMinute"}')
           == "QUOTA_EXCEEDED_PER_MINUTE")
-    check("retryDelay 를 90초 이내로 제한",
-          cl._retry_delay('"retryDelay": "600s"') <= 90)
+    check("서버 retryDelay 를 상한(%ds) 이내로 제한" % G.MAX_BACKOFF_SECONDS,
+          cl._retry_delay('"retryDelay": "600s"') <= G.MAX_BACKOFF_SECONDS)
+    check("retryDelay 가 없으면 0 (고정 backoff 를 쓴다)",
+          cl._retry_delay("") == 0)
     for key in ("GEMINI_API_KEY", "GEMINI_MODEL", "AI_CALL_BUDGET"):
         os.environ.pop(key, None)
+
+
+# ── 5-A. 재시도 루프 (네트워크 없이 _post 대체, 대기 없이) ──────
+def test_retry_loop():
+    os.environ["GEMINI_API_KEY"] = "selftest-not-a-real-key"
+    os.environ["GEMINI_MODEL"] = "selftest-model"
+    os.environ.pop("AI_CALL_BUDGET", None)
+    slept = []
+    real_sleep = G.time.sleep
+    G.time.sleep = lambda s: slept.append(s)   # 셀프테스트는 실제로 대기하지 않는다
+    try:
+        def raiser(code):
+            def _post(payload):
+                raise urllib.error.HTTPError("https://x", code, "err", {}, None)
+            return _post
+
+        client = G.GeminiClient(pace=0)
+        client._post = raiser(503)
+        err = None
+        try:
+            client.generate("t_503", "i", "[]", {"type": "OBJECT"})
+        except G.GeminiFailClosed as exc:
+            err = exc
+        check("503 은 단계당 3회까지 시도", client.attempts == 3, str(client.attempts))
+        check("503 재시도 2회", client.retries == 2, str(client.retries))
+        check("backoff 60초 -> 120초 적용",
+              client.backoff_waits == [60, 120] and slept == [60, 120],
+              str(client.backoff_waits))
+        check("3회 실패 후 Fail Closed",
+              err is not None and err.category == "SERVICE_UNAVAILABLE_503",
+              err and err.category)
+        check("마지막 HTTP status 503 기록", client.last_http_status == 503)
+        check("final category 기록",
+              client.last_category == "SERVICE_UNAVAILABLE_503")
+        check("재시도도 호출로 세어 예산에 반영", client.calls == 3, str(client.calls))
+        u = client.usage()
+        check("usage 에 attempt/retry/status/category 노출",
+              u["attempts"] == 3 and u["retries"] == 2
+              and u["last_http_status"] == 503
+              and u["final_category"] == "SERVICE_UNAVAILABLE_503")
+
+        for code, label in ((400, "400"), (403, "403"), (500, "500")):
+            c = G.GeminiClient(pace=0)
+            c._post = raiser(code)
+            try:
+                c.generate("t_%d" % code, "i", "[]", {"type": "OBJECT"})
+            except G.GeminiFailClosed:
+                pass
+            check("HTTP %s 는 재시도 없이 1회 시도" % label,
+                  c.attempts == 1 and c.retries == 0,
+                  "attempts=%d retries=%d" % (c.attempts, c.retries))
+
+        # 예산이 남지 않으면 재시도하지 않는다 (HARD_CAP 유지).
+        c = G.GeminiClient(budget=1, pace=0)
+        c._post = raiser(503)
+        try:
+            c.generate("t_budget", "i", "[]", {"type": "OBJECT"})
+        except (G.GeminiFailClosed, G.CallBudgetExceeded):
+            pass
+        check("예산이 1이면 재시도하지 않는다",
+              c.calls == 1 and c.retries == 0,
+              "calls=%d retries=%d" % (c.calls, c.retries))
+    finally:
+        G.time.sleep = real_sleep
+        for key in ("GEMINI_API_KEY", "GEMINI_MODEL"):
+            os.environ.pop(key, None)
 
 
 # ── 6·7. 조립 · QA · Gate ───────────────────────────────────────
@@ -583,6 +667,7 @@ def main():
     test_selection_and_numbers()
     test_signal_and_price()
     test_budget()
+    test_retry_loop()
     test_build_qa_gate()
     print("")
     print("PASS %d / FAIL %d" % (len(PASS), len(FAIL)))

@@ -188,6 +188,7 @@ GA-3는 발송을 검증하는 단계가 아니다 — 그것은 GA-2C에서 이
 |---|---|
 | 2026-10-01 | 최초 작성. GA-2C PASS 기록 후 GA-3 준비 상태·블로커 2건·권고 순서 정리. **GA-3 미실행** |
 | 2026-10-01 | 순서 A 착수 — STEP 12 Gemini 프로브 workflow 신설(`gemini-probe.yml`). **미실행.** 블로커 ②(파이프라인 코드 0건)는 그대로 |
+| 2026-10-07 | Dry Run 2회 503 실패 → Gemini 재시도 backoff 개정(단계당 3회 시도 · 60→120초). **§8-7 참조. 재실행 대기** |
 | 2026-10-07 | STEP 12 PASS(`gemini-3.8-flash`) 확인 → 블로커 ① 해소. 파이프라인 9개 모듈 + GA-3 workflow 신설로 블로커 ② 해소. 발송 정책을 `[TEST]` 1통(사용자 확인 입력 필수)으로 확정. **§8 참조. GA-3 자체는 아직 미실행** |
 
 ---
@@ -221,7 +222,7 @@ responseSchema / usageMetadata / Overall PASS)하고 Repository Variable `GEMINI
 | 정상 실행 목표 | **7 호출** | `analyze.py` 단계 구성 |
 | 권고 상한 | **8 호출** (재시도 1회 포함) | `RECOMMENDED_CAP` |
 | 절대 상한 | **10 호출** | `HARD_CAP` — 초과 요청은 호출 **전에** 거부 |
-| 재시도 | **503 / 429(분당 한도)만 1회** | `_retryable()` |
+| 재시도 | **503 / 429(분당 한도)만.** 단계당 **최대 3회 시도**(재시도 2회), 대기 **60초 → 120초**, 실행당 재시도 총 3회 (2026-10-07 개정 — §8-7) | `_retryable()` · `BACKOFF_SECONDS` |
 | 429 일일 한도(RPD) · 구분 불가 | **재시도 없음, 즉시 중단** | 보수적 분류 |
 | 그 밖의 모든 오류 | **즉시 Fail Closed** | 400/401/403/404/500/네트워크/스키마 위반 |
 | RPM 5 준수 | 호출 간 **30초** 페이싱 | `PACE_SECONDS` |
@@ -283,3 +284,33 @@ GA-3 는 Status=TEST 발송이라 §4-3 에 따라 중복 판정 대상이 아�
 - 정식 발송 (`[WEEKLY INTELLIGENCE]` 제목 · Status=SENT)
 - 기준선 파일·원장·트래커 CSV 쓰기 (workflow 마지막 Guard 가 `git status` 로 무변경 확인)
 - 합격선 하향 (§4 의 B1~B7 / N1~N5 그대로)
+
+### 8-7. Dry Run 2회 실패 → 재시도 backoff 개정 (2026-10-07)
+
+| 회차 | 결과 |
+|---|---|
+| Dry Run 1 | 앞단(Selftest·수집) 정상, **STEP 2 에서 `SERVICE_UNAVAILABLE_503`** |
+| Dry Run 2 | 동일 — **503 재현** |
+
+503 은 Gemini 측 **일시적 과부하**이며 우리 요청의 결함이 아니다. 기존 정책(단계당 재시도 1회,
+대기 20초)은 과부하 구간을 넘기기에 짧았다. 아래만 바꾼다.
+
+| 항목 | 이전 | **현재** |
+|---|---|---|
+| 단계당 시도 | 2회 (재시도 1) | **3회 (재시도 2)** — `MAX_ATTEMPTS_PER_STAGE` |
+| 대기 | 20초 고정 | **60초 → 120초** — `BACKOFF_SECONDS` (상한 180초) |
+| 재시도 대상 | 503 / 429(분당) | **동일 — 변경 없음** |
+| 429 일일 한도 · 구분 불가 | 재시도 없음 | **동일 — 즉시 중단** |
+| 그 밖의 오류 | 즉시 Fail Closed | **동일** |
+| 실행당 재시도 총량 | 3회 | **동일** (7 + 3 = `HARD_CAP` 10) |
+
+Summary·QA 에 **attempt count / retry count / 마지막 HTTP status / final category** 를 표시한다
+(성공·실패 양쪽 경로 모두).
+
+**수정 파일은 4개뿐이다** — `gemini_client.py`(정책) · `analyze.py`(Summary 표시) ·
+`qa.py`(지표 2행) · workflow 의 Guard 상수 검사. 수집 · QA 판정 · Gmail · send gate ·
+`confirm_send` 로직과 W38 기준파일은 **무변경**이며 `schedule` 도 여전히 없다.
+
+자체 점검(pyodide): py_compile 오류 0 / selftest **112 PASS · 0 FAIL**
+(503 3회 시도·60→120초 backoff·400/403/500 즉시 중단·예산 1이면 재시도 없음 포함) /
+Guard 전체 exit 0 / 가짜 Gemini 전구간 7호출·`SEND_TEST` 유지.

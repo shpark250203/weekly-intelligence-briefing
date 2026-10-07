@@ -6,12 +6,13 @@
   권고 상한      : 8 호출 (재시도 1회 포함)
   절대 상한      : 10 호출 — HARD_CAP. 초과 요청은 호출 전에 거부한다.
 
-재시도 (사용자 GA-3 지시 3·4번 + 설계 2-5)
-  HTTP 503            → 최대 1회 재시도
-  HTTP 429 (분당 한도) → 최대 1회 재시도 (retryDelay 존중)
+재시도 (2026-10-07 개정 — 503 과부하 2회 연속 실패 대응)
+  HTTP 503            → 재시도. 1차 실패 후 **60초**, 2차 실패 후 **120초** 대기
+  HTTP 429 (분당 한도) → 같은 backoff. 서버가 준 retryDelay 가 더 길면 그쪽을 따른다
   HTTP 429 (일일 RPD) → **재시도 금지. 즉시 중단** — 오늘은 회복되지 않는다
   그 외 모든 오류      → **재시도 금지. 즉시 Fail Closed**
-  단계당 최대 1회, 실행당 총 3회.
+  **단계당 최대 3회 시도(재시도 2회)**, 실행당 재시도 총 3회.
+  재시도도 호출 1건으로 세며 HARD_CAP 10 을 넘지 못한다 (7 + 3 = 10).
 
 금지
   - 모델 ID 하드코딩 (Repository Variable GEMINI_MODEL 로만 주입)
@@ -38,8 +39,12 @@ TIMEOUT = 180
 HARD_CAP = 10
 TARGET_CALLS = 7
 RECOMMENDED_CAP = 8
-MAX_RETRIES_PER_STAGE = 1
+MAX_RETRIES_PER_STAGE = 2
+MAX_ATTEMPTS_PER_STAGE = MAX_RETRIES_PER_STAGE + 1   # = 3 (최초 1회 + 재시도 2회)
 MAX_RETRIES_TOTAL = 3
+# 재시도 대기 — 1차 실패 후 60초, 2차 실패 후 120초. 고정 스케줄이며 무한 대기가 없다.
+BACKOFF_SECONDS = (60, 120)
+MAX_BACKOFF_SECONDS = 180  # 서버 retryDelay 를 따르더라도 이 값을 넘지 않는다
 PACE_SECONDS = 30          # RPM 5 준수 (설계 2-2)
 MAX_PROMPT_CHARS = 120_000  # 호출당 입력 100K 토큰 상한의 보수적 환산
 MODEL_RE = re.compile(r"^[A-Za-z0-9.\-]{1,64}$")
@@ -79,6 +84,11 @@ class GeminiClient:
         self.tokens_out = 0
         self.tokens_total = 0
         self.log = []
+        # Summary 표시용 — 시도 수 / 재시도 수 / 마지막 HTTP status / 마지막 category
+        self.attempts = 0
+        self.last_http_status = None
+        self.last_category = None
+        self.backoff_waits = []
         self._last_call_at = 0.0
         if not self.api_key:
             raise GeminiFailClosed("SECRET_MISSING_GEMINI_API_KEY")
@@ -118,10 +128,22 @@ class GeminiClient:
 
     @staticmethod
     def _retry_delay(text):
+        """서버가 준 retryDelay (없으면 0). 상한을 넘기지 않는다."""
         m = re.search(r'"retryDelay"\s*:\s*"(\d+)s"', text or "")
         if m:
-            return min(int(m.group(1)) + 2, 90)
-        return 65
+            return min(int(m.group(1)) + 2, MAX_BACKOFF_SECONDS)
+        return 0
+
+    @classmethod
+    def backoff_for(cls, retry_index, category=None, detail=None):
+        """재시도 대기 초. 1차 실패 후 60초, 2차 실패 후 120초 (고정 스케줄).
+
+        429 에서 서버가 더 긴 retryDelay 를 주면 그쪽을 따른다 (상한 180초).
+        """
+        base = BACKOFF_SECONDS[min(retry_index, len(BACKOFF_SECONDS) - 1)]
+        if category == "QUOTA_EXCEEDED_PER_MINUTE":
+            base = max(base, cls._retry_delay(detail))
+        return min(base, MAX_BACKOFF_SECONDS)
 
     def _reserve(self, stage):
         if self.calls + 1 > self.budget:
@@ -152,6 +174,7 @@ class GeminiClient:
         self._reserve(stage)
         self._pace_wait()
         self.calls += 1
+        self.attempts += 1
         self._last_call_at = time.time()
         try:
             status, raw = self._post(payload)
@@ -160,22 +183,31 @@ class GeminiClient:
                 body = e.read().decode("utf-8", "replace")
             except Exception:
                 body = ""
+            self.last_http_status = e.code
             category = self._classify(e.code, body)
+            self.last_category = category
             raise GeminiFailClosed(category, self._sanitize(body))
         except urllib.error.URLError as e:
+            self.last_http_status = None
+            self.last_category = "NETWORK_ERROR"
             raise GeminiFailClosed(
                 "NETWORK_ERROR", self._sanitize(getattr(e, "reason", ""))
             )
         except Exception as e:
-            raise GeminiFailClosed("UNEXPECTED_" + type(e).__name__)
+            self.last_category = "UNEXPECTED_" + type(e).__name__
+            raise GeminiFailClosed(self.last_category)
+        self.last_http_status = status
         if status != 200:
-            raise GeminiFailClosed(self._classify(status, raw), self._sanitize(raw))
+            self.last_category = self._classify(status, raw)
+            raise GeminiFailClosed(self.last_category, self._sanitize(raw))
+        self.last_category = None
         return raw
 
     def _parse(self, stage, raw):
         try:
             body = json.loads(raw)
         except Exception:
+            self.last_category = "RESPONSE_NOT_JSON"
             raise GeminiFailClosed("RESPONSE_NOT_JSON")
         usage = body.get("usageMetadata") or {}
         self.tokens_in += int(usage.get("promptTokenCount") or 0)
@@ -199,7 +231,11 @@ class GeminiClient:
 
     # ── 공개 API ─────────────────────────────────────────────────
     def generate(self, stage, instruction, data, schema, max_output_tokens=8192):
-        """구조화 출력 1단계를 수행한다. 재시도는 정책이 허용할 때 1회뿐이다."""
+        """구조화 출력 1단계를 수행한다.
+
+        재시도는 503 / 429(분당)에서만, 단계당 최대 2회(= 총 3회 시도)다.
+        대기는 60초 -> 120초 고정 스케줄이며, 그 밖의 오류는 즉시 Fail Closed.
+        """
         prompt = instruction.strip() + "\n\n[DATA]\n" + data
         truncated = len(prompt) > MAX_PROMPT_CHARS
         if truncated:
@@ -213,15 +249,16 @@ class GeminiClient:
                 "temperature": 0.2,
             },
         }
-        # 시도 횟수는 구조적으로 1 + MAX_RETRIES_PER_STAGE 로 고정된다.
+        # 시도 횟수는 구조적으로 MAX_ATTEMPTS_PER_STAGE(=3)로 고정된다.
         # 무한 루프·대기 루프를 만들지 않는다 (설계 2-5 금지사항 4).
-        for attempt in range(MAX_RETRIES_PER_STAGE + 1):
+        for attempt in range(MAX_ATTEMPTS_PER_STAGE):
             try:
                 raw = self._call_once(stage, payload)
                 out = self._parse(stage, raw)
                 self.log.append({
-                    "stage": stage, "result": "OK", "calls_so_far": self.calls,
-                    "prompt_chars": len(prompt), "truncated": truncated,
+                    "stage": stage, "result": "OK", "attempt": attempt + 1,
+                    "calls_so_far": self.calls, "prompt_chars": len(prompt),
+                    "truncated": truncated,
                 })
                 return out
             except GeminiFailClosed as e:
@@ -232,16 +269,19 @@ class GeminiClient:
                     and self.calls + 1 <= self.budget
                 )
                 self.log.append({
-                    "stage": stage, "result": "FAIL", "category": e.category,
-                    "detail": e.detail, "calls_so_far": self.calls,
-                    "retry": bool(can_retry),
+                    "stage": stage, "result": "FAIL", "attempt": attempt + 1,
+                    "category": e.category, "detail": e.detail,
+                    "http_status": self.last_http_status,
+                    "calls_so_far": self.calls, "retry": bool(can_retry),
                 })
                 if not can_retry:
                     raise
                 self.retries += 1
-                delay = (self._retry_delay(e.detail or "")
-                         if e.category == "QUOTA_EXCEEDED_PER_MINUTE" else 20)
-                print("   재시도 1회 (%s) — %ds 대기" % (e.category, delay), flush=True)
+                delay = self.backoff_for(attempt, e.category, e.detail)
+                self.backoff_waits.append(delay)
+                print("   재시도 %d/%d (%s, HTTP %s) — %ds 대기"
+                      % (attempt + 1, MAX_RETRIES_PER_STAGE, e.category,
+                         self.last_http_status, delay), flush=True)
                 time.sleep(delay)
         raise GeminiFailClosed("RETRY_EXHAUSTED_" + stage)
 
@@ -249,7 +289,13 @@ class GeminiClient:
         return {
             "model": self.model,
             "calls": self.calls,
+            "attempts": self.attempts,
             "retries": self.retries,
+            "last_http_status": self.last_http_status,
+            "final_category": self.last_category,
+            "backoff_waits": self.backoff_waits,
+            "max_attempts_per_stage": MAX_ATTEMPTS_PER_STAGE,
+            "backoff_schedule": list(BACKOFF_SECONDS),
             "budget": self.budget,
             "hard_cap": HARD_CAP,
             "target_calls": TARGET_CALLS,

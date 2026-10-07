@@ -203,7 +203,12 @@ def collect_qa(collected, analysis, md, html):
     extra = [
         ("A", "Gemini 호출 수 / 예산", "%s / %s (절대 상한 %s)"
          % (usage.get("calls"), usage.get("budget"), usage.get("hard_cap"))),
-        ("B", "Gemini 재시도", str(usage.get("retries"))),
+        ("B", "Gemini attempt / retry", "%s회 시도 / %s회 재시도 (단계당 최대 %s회, "
+         "backoff %s초)"
+         % (usage.get("attempts"), usage.get("retries"),
+            usage.get("max_attempts_per_stage"), usage.get("backoff_schedule"))),
+        ("B2", "마지막 HTTP status / final category", "%s / %s"
+         % (usage.get("last_http_status"), usage.get("final_category") or "OK")),
         ("C", "Fallback 모델 사용", "NO"),
         ("D", "숫자 검증 삭제(미검증 수치)", str(numbers_removed)),
         ("E", "Signal 강등(조건 미달)", str(analysis["verification"]["signals_demoted"])),

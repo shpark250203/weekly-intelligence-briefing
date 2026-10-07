@@ -754,9 +754,20 @@ def main():
         })
         C.append_summary(
             "### STEP 2 — Gemini 분석: **FAIL CLOSED**\n\n"
-            "- category: `%s`\n- 소모한 호출 수: **%s**\n"
-            "- 재시도: %s\n- Brief 생성·발송: **없음**\n"
-            % (category, usage.get("calls"), usage.get("retries"))
+            "| 항목 | 값 |\n|---|---|\n"
+            "| **Gemini attempt count** | **%s** |\n"
+            "| **retry count** | **%s** (단계당 최대 %s회 시도, backoff %s초) |\n"
+            "| **마지막 HTTP status** | **%s** |\n"
+            "| **final category** | **`%s`** |\n"
+            "| 소모한 호출 수 | %s / 예산 %s (절대 상한 %s) |\n"
+            "| 재시도 대기 이력 | %s |\n"
+            "| Brief 생성·발송 | **없음** |\n"
+            % (usage.get("attempts"), usage.get("retries"),
+               usage.get("max_attempts_per_stage"),
+               usage.get("backoff_schedule"), usage.get("last_http_status"),
+               usage.get("final_category") or category,
+               usage.get("calls"), usage.get("budget"), usage.get("hard_cap"),
+               usage.get("backoff_waits") or "없음")
         )
         print("FAIL CLOSED: %s — %s" % (category, C.sanitize(detail)))
         return 2
@@ -769,12 +780,22 @@ def main():
     C.append_summary(
         "### STEP 2 — Gemini 분석\n\n"
         "| 항목 | 값 |\n|---|---|\n"
-        "| 모델 | `%s` |\n| 호출 수 | **%d** / 예산 %d (절대 상한 %d) |\n"
-        "| 재시도 | %d |\n| 토큰 (in/out/total) | %d / %d / %d |\n"
+        "| 모델 | `%s` |\n"
+        "| **Gemini attempt count** | **%d** |\n"
+        "| **retry count** | **%d** (단계당 최대 %d회 시도, backoff %s초) |\n"
+        "| **마지막 HTTP status** | **%s** |\n"
+        "| **final category** | **`%s`** |\n"
+        "| 호출 수 | **%d** / 예산 %d (절대 상한 %d) |\n"
+        "| 재시도 대기 이력 | %s |\n"
+        "| 토큰 (in/out/total) | %d / %d / %d |\n"
         "| Fallback 모델 사용 | %s |\n| 2-of-5 미달 제외 | %d |\n"
         "| 숫자 검증 삭제 | %d |\n| Signal 강등 | %d |\n| 규격 위반 교정 | %d |\n"
         "| MUST KNOW | %d |\n| 신제품 KR/US/JP | %d / %d / %d |\n"
-        % (u["model"], u["calls"], u["budget"], u["hard_cap"], u["retries"],
+        % (u["model"], u["attempts"], u["retries"],
+           u["max_attempts_per_stage"], u["backoff_schedule"],
+           u["last_http_status"], u["final_category"] or "OK",
+           u["calls"], u["budget"], u["hard_cap"],
+           u["backoff_waits"] or "없음",
            u["tokens_in"], u["tokens_out"], u["tokens_total"],
            "NO", stats["excluded_by_rule"], stats["numbers_removed"],
            stats["signals_demoted"], stats["spec_violations"],

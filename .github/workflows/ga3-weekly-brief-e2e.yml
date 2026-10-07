@@ -184,8 +184,11 @@ jobs:
           grep -qE '^HARD_CAP = 10$' gemini_client.py || fail "HARD_CAP=10 이 아니다."
           grep -qE '^TARGET_CALLS = 7$' gemini_client.py || fail "TARGET_CALLS=7 이 아니다."
           grep -qE '^RECOMMENDED_CAP = 8$' gemini_client.py || fail "RECOMMENDED_CAP=8 이 아니다."
-          grep -qE '^MAX_RETRIES_PER_STAGE = 1$' gemini_client.py || fail "단계당 재시도 상한이 1이 아니다."
+          grep -qE '^MAX_RETRIES_PER_STAGE = 2$' gemini_client.py || fail "단계당 재시도 상한이 2가 아니다."
+          grep -qE '^MAX_ATTEMPTS_PER_STAGE = MAX_RETRIES_PER_STAGE \+ 1 ' gemini_client.py \
+            || fail "단계당 총 시도 횟수가 3으로 고정되어 있지 않다."
           grep -qE '^MAX_RETRIES_TOTAL = 3$' gemini_client.py || fail "실행당 재시도 총량이 3이 아니다."
+          grep -qE '^BACKOFF_SECONDS = \(60, 120\)$' gemini_client.py || fail "backoff 가 60/120초가 아니다."
           grep -qF 'min(int(budget), HARD_CAP)' gemini_client.py || fail "예산이 HARD_CAP 으로 제한되지 않는다."
           echo "  -> OK"
 
