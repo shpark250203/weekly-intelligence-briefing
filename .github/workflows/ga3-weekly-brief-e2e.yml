@@ -1,0 +1,340 @@
+# GA-3 — Weekly Brief End-to-End 수동 테스트 (1회)
+#
+# 목적: 실제 자동화와 동일한 흐름을 수동 1회 검증한다.
+#   수집 → Source 검증 → 중복 제거 → Gemini 분석/요약 → Weekly Brief 생성
+#   → Compact Email 생성 → QA → (QA PASS일 때만) Gmail SMTP 테스트 발송
+#
+# 재사용하는 검증 완료 구성 (바꾸지 않는다):
+#   GA-1 Connectivity (2026-09-29 PASS)  — Source 경로
+#   GA-2  SMTP 연결성 / GA-2B AUTH / GA-2C 발송 1통 (2026-10-01 PASS)
+#         → CONNECT/TLS/AUTH 블록을 구조·순서·인자까지 그대로 재사용
+#   GA-2 STEP 12 Gemini Probe (PASS)     — 모델·구조화 출력·토큰 회계
+#   Secret: GEMINI_API_KEY · GMAIL_USERNAME · GMAIL_APP_PASSWORD · WIB_RECIPIENT
+#   Variable: GEMINI_MODEL (= gemini-3.8-flash) · AI_CALL_BUDGET
+#
+# 이 workflow 가 하지 않는 것 (설계상 막아둔 것):
+#   - schedule 자동 실행 0건            (workflow_dispatch 전용 — 아래 on: 참조)
+#   - CLOUD_MODE 생성·변조              (gate.py 가 프로세스 환경변수를 조회만 한다)
+#   - 정식 발송                          (보내는 메일은 제목에 [TEST] 가 붙은 1통뿐)
+#   - 기준선 파일 수정                   (산출물은 RUNNER_TEMP 에만 쓴다, 마지막에 검증)
+#   - 저장소 쓰기                        (permissions: contents: read)
+#   - Secret 값·수신 주소 평문 출력       (마스킹 경유만, Guard 가 정적 검사)
+#   - Gemini 10 호출 초과                (HARD_CAP=10, 목표 7, 권고 상한 8)
+#   - 503/429(분당) 외 재시도            (그 밖의 오류는 즉시 Fail Closed)
+#
+# 발송 조건 (send_gate.md §1-2 LOCAL MODE 수동 테스트 경로):
+#   G1 Brief 생성 · G2 Email 생성 · G3 Critical QA FAIL=0 · G4 수신자 환경변수
+#   · G6 중복 확인 수행 · G7 같은 주차 정식 발송 기록 없음
+#   · 그리고 사용자가 confirm_send 에 SEND-TEST 를 **직접 입력**한 경우에만.
+#   하나라도 어긋나면 메일을 보내지 않고 산출물만 남긴다 (FAIL CLOSED).
+
+name: GA-3 Weekly Brief E2E (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      weekly_id:
+        description: '커버리지 주차 (ISO). GA-3 기준선 비교용 고정값은 2026-W38.'
+        required: true
+        default: '2026-W38'
+      confirm_send:
+        description: '테스트 메일 1통을 보내려면 SEND-TEST 를 정확히 입력. 비우면 발송 없이 산출물만 생성.'
+        required: false
+        default: ''
+      force_resend:
+        description: '같은 주차 GA-3 TEST 재발송이 필요할 때만 주차를 명시 (예: 2026-W38). G7만 면제된다.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ga3-weekly-brief-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: Collect -> Gemini -> Brief -> QA -> Gate -> (TEST mail)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    env:
+      PIPE: 04_PIPELINE
+      OUT: ${{ runner.temp }}/ga3-out
+      WEEKLY_ID: ${{ inputs.weekly_id }}
+      # 저장소 안에 __pycache__ 가 생기지 않게 한다 (마지막 무변경 Guard 보호).
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout (read-only)
+        uses: actions/checkout@v4
+
+      - name: Runner fingerprint
+        run: |
+          set -uo pipefail
+          mkdir -p "${OUT}"
+          {
+            echo "## GA-3 Weekly Brief E2E"
+            echo ""
+            echo "- Run started (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "- Weekly ID: \`${WEEKLY_ID}\`"
+            echo "- Runner: ${RUNNER_OS} / ${RUNNER_ARCH}"
+            echo "- python: $(python3 --version)"
+            echo "- 발송 확인 입력 제공됨: $([ -n "${CONFIRM}" ] && echo yes || echo no)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          CONFIRM: ${{ inputs.confirm_send }}
+
+      - name: STEP 0a — Guard (정적 검사, 호출·발송 전에 막는다)
+        run: |
+          set -uo pipefail
+          cd "${GITHUB_WORKSPACE}/${PIPE}"
+          fail() { echo "::error::$1"; exit 1; }
+
+          echo "== Python 문법 검사 (가장 먼저 — 예산·시간 보호)"
+          # 바이트코드는 저장소 밖(임시 디렉터리)에만 쓴다.
+          python3 - <<'PYCHECK' || fail "Python 문법 오류가 있다. 수집·호출·발송을 시작하지 않는다."
+          import os, py_compile, sys, tempfile
+          tmp = tempfile.mkdtemp()
+          files = sorted(f for f in os.listdir(".") if f.endswith(".py"))
+          bad = 0
+          for name in files:
+              try:
+                  py_compile.compile(name, cfile=os.path.join(tmp, name + "c"),
+                                     doraise=True)
+              except py_compile.PyCompileError as exc:
+                  print("SYNTAX ERROR: %s" % exc)
+                  bad += 1
+          print("  checked %d files / errors %d" % (len(files), bad))
+          sys.exit(1 if bad else 0)
+          PYCHECK
+          echo "  -> OK"
+
+          echo "== schedule 트리거 부재"
+          if grep -nE '^[[:space:]]*schedule:' "${GITHUB_WORKSPACE}/.github/workflows/ga3-weekly-brief-e2e.yml"; then
+            fail "이 workflow 에 schedule 이 있다. GA-3 는 수동 실행 전용이다."
+          fi
+          echo "  -> 0건"
+
+          echo "== 발송 코드는 gmail_send.py 에만 존재"
+          if grep -nE '^[^#]*(smtplib|send_message|sendmail)' \
+               collector.py analyze.py build.py qa.py gate.py gemini_client.py \
+               common.py sources.py selftest.py; then
+            fail "발송 코드가 발송 모듈 밖에서 발견되었다."
+          fi
+          N=$(grep -cE '^[^#]*\.send_message[[:space:]]*\(' gmail_send.py || true)
+          echo "  send_message( 호출: ${N}건"
+          [ "$N" -eq 1 ] || fail "send_message 호출이 1회가 아니다 (${N}건)."
+          grep -nE '^[^#]*\.sendmail[[:space:]]*\(' gmail_send.py && \
+            fail "sendmail() 이 발견되었다. send_message() 1회만 허용한다."
+          echo "  -> OK"
+
+          echo "== FAIL CLOSED: AUTH 게이트가 발송보다 앞에 있는가"
+          GATE_LN=$(grep -nE '^[^#]*if steps\["AUTH"\] != "PASS":' gmail_send.py | head -1 | cut -d: -f1)
+          SEND_LN=$(grep -nE '^[^#]*\.send_message[[:space:]]*\(' gmail_send.py | head -1 | cut -d: -f1)
+          echo "  AUTH 게이트 ${GATE_LN:-없음} / send_message ${SEND_LN:-없음}"
+          [ -n "${GATE_LN}" ] && [ -n "${SEND_LN}" ] || fail "AUTH 게이트 또는 발송 호출을 찾지 못했다."
+          [ "${GATE_LN}" -lt "${SEND_LN}" ] || fail "AUTH 게이트가 발송보다 뒤에 있다."
+          echo "  -> OK"
+
+          echo "== GA-2B/2C PASS 코드 재사용 동일성"
+          for PAT in \
+            'HOST = "smtp.gmail.com"' \
+            'PORT = 587' \
+            'TIMEOUT = 30' \
+            'socket.create_connection((HOST, PORT), timeout=TIMEOUT)' \
+            'smtplib.SMTP(HOST, PORT, timeout=TIMEOUT)' \
+            'ssl.create_default_context()' \
+            'smtp.starttls(context=ctx)' \
+            'smtp.login(user, pw)' ; do
+            grep -qF "$PAT" gmail_send.py || fail "GA-2B PASS 코드의 필수 구문이 없다: ${PAT}"
+          done
+          ORDER=$(grep -nE '^[^#]*(\.ehlo\(|\.starttls\(|\.login\()' gmail_send.py \
+                  | sed -E 's/.*\.(ehlo|starttls|login).*/\1/' | tr '\n' ' ')
+          echo "  SMTP 절차 순서: ${ORDER}"
+          [ "${ORDER}" = "ehlo starttls ehlo login " ] || fail "SMTP 절차 순서가 GA-2B 와 다르다."
+          echo "  -> OK"
+
+          echo "== TLS 검증 무력화 / 디버그 로그"
+          if grep -nE '^[^#]*(CERT_NONE|check_hostname[[:space:]]*=[[:space:]]*False|_create_unverified|set_debuglevel)' *.py; then
+            fail "TLS 검증 무력화 또는 SMTP 디버그 출력 코드가 발견되었다."
+          fi
+          echo "  -> 0건"
+
+          echo "== Gemini 호출 지점 1곳 · Key 는 헤더로만"
+          N=$(grep -cE '^[^#]*urllib\.request\.urlopen[[:space:]]*\(' gemini_client.py || true)
+          echo "  gemini_client urlopen: ${N}건"
+          [ "$N" -eq 1 ] || fail "Gemini 호출 지점이 1곳이 아니다 (${N}건)."
+          grep -qF 'req.add_header("x-goog-api-key", self.api_key)' gemini_client.py \
+            || fail "x-goog-api-key 헤더 전송 구문이 없다."
+          if grep -nE '^[^#]*(\?key=|&key=)' gemini_client.py; then
+            fail "API Key 를 URL 쿼리에 넣는 코드가 발견되었다."
+          fi
+          echo "  -> OK"
+
+          echo "== 호출 예산·재시도 상한 상수"
+          grep -qE '^HARD_CAP = 10$' gemini_client.py || fail "HARD_CAP=10 이 아니다."
+          grep -qE '^TARGET_CALLS = 7$' gemini_client.py || fail "TARGET_CALLS=7 이 아니다."
+          grep -qE '^RECOMMENDED_CAP = 8$' gemini_client.py || fail "RECOMMENDED_CAP=8 이 아니다."
+          grep -qE '^MAX_RETRIES_PER_STAGE = 1$' gemini_client.py || fail "단계당 재시도 상한이 1이 아니다."
+          grep -qE '^MAX_RETRIES_TOTAL = 3$' gemini_client.py || fail "실행당 재시도 총량이 3이 아니다."
+          grep -qF 'min(int(budget), HARD_CAP)' gemini_client.py || fail "예산이 HARD_CAP 으로 제한되지 않는다."
+          echo "  -> OK"
+
+          echo "== 재시도 허용 범위 (503 / 429 분당 한도만)"
+          grep -qF 'return category in ("SERVICE_UNAVAILABLE_503", "QUOTA_EXCEEDED_PER_MINUTE")' gemini_client.py \
+            || fail "재시도 허용 범위가 503 · 429(분당)로 한정되어 있지 않다."
+          echo "  -> OK"
+
+          echo "== 모델 ID 하드코딩 / Fallback 자동 전환"
+          if grep -nE "[\"']gemini-[0-9]" *.py; then
+            fail "모델 ID 하드코딩이 발견되었다. Variable GEMINI_MODEL 로만 주입한다."
+          fi
+          if grep -nE '^[^#]*GEMINI_MODEL_FALLBACK' *.py; then
+            fail "Fallback 모델 사용 코드가 발견되었다. GA-3 는 Fallback 을 쓰지 않는다."
+          fi
+          echo "  -> 0건"
+
+          echo "== Secret·수신주소 출력"
+          if grep -nE '^[^#]*(print|append|write)\(.*(api_key|\bpw\b|pw_raw)' *.py; then
+            fail "Secret 을 출력하는 코드가 발견되었다."
+          fi
+          if grep -nE '^[^#]*(print|append|write)\(.*(\brcpt\b|rcpt_raw)' *.py | grep -vE 'mask_email'; then
+            fail "수신 주소를 마스킹 없이 출력하는 코드가 발견되었다."
+          fi
+          if grep -nE '^[^#]*len\([[:space:]]*(api_key|pw|pw_raw|rcpt|rcpt_raw)[[:space:]]*\)' *.py \
+             | grep -vE 'len\((api_key|pw|pw_raw|rcpt|rcpt_raw)\)[[:space:]]*>=[[:space:]]*[48]'; then
+            fail "Secret 길이를 노출할 수 있는 코드가 발견되었다."
+          fi
+          echo "  -> 0건"
+
+          echo "== 수신 주소 하드코딩"
+          if grep -nE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' *.py \
+             | grep -vE 'example\.(org|com)|ANY_EMAIL_RE|EMAIL_RE|REDACTED'; then
+            fail "메일 주소가 코드에 하드코딩되어 있다. 환경변수 WIB_RECIPIENT 로만 주입한다."
+          fi
+          echo "  -> 0건"
+
+          echo "== CLOUD_MODE 변조 / 기준선 파일 쓰기"
+          if grep -nE "CLOUD_MODE[\"']?[[:space:]]*\][[:space:]]*=|CLOUD_MODE[[:space:]]*=[[:space:]]*[\"']true" *.py; then
+            fail "CLOUD_MODE 를 코드에서 설정하는 흔적이 발견되었다."
+          fi
+          grep -qF 'os.environ.get("CLOUD_MODE")' gate.py || fail "gate.py 가 CLOUD_MODE 를 직접 조회하지 않는다."
+          if grep -nE '(open|write_text|write_json)\([^)]*01_WEEKLY_BRIEFS' *.py; then
+            fail "기준선 디렉터리에 쓰는 코드가 발견되었다."
+          fi
+          if grep -nE '(open|write_text|write_json)\([^)]*(send_ledger|source_ledger|new_product_signals)' *.py \
+             | grep -vE 'read_json|read_ledger'; then
+            fail "원장·트래커 CSV 에 쓰는 코드가 발견되었다. GA-3 는 읽기만 한다."
+          fi
+          echo "  -> 0건"
+
+      - name: STEP 0b — Selftest (네트워크·AI·SMTP 미사용)
+        run: |
+          set -uo pipefail
+          python3 -B "${GITHUB_WORKSPACE}/${PIPE}/selftest.py"
+
+      - name: STEP 1 — 수집 (AI 호출 0건 / Secret 0건)
+        run: |
+          set -uo pipefail
+          python3 -B "${GITHUB_WORKSPACE}/${PIPE}/collector.py" \
+            --weekly-id "${WEEKLY_ID}" \
+            --out "${OUT}/collected.json"
+
+      - name: STEP 2 — Gemini 분석 (목표 7 / 권고 8 / 절대 상한 10 호출)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          AI_CALL_BUDGET: ${{ vars.AI_CALL_BUDGET || '10' }}
+        run: |
+          set -uo pipefail
+          if [ -z "${GEMINI_MODEL}" ]; then
+            echo "::error::Repository Variable GEMINI_MODEL 이 비어 있다. 모델을 하드코딩하지 않는다."
+            exit 1
+          fi
+          echo "model=${GEMINI_MODEL} / budget=${AI_CALL_BUDGET}"
+          python3 -B "${GITHUB_WORKSPACE}/${PIPE}/analyze.py" \
+            --collected "${OUT}/collected.json" \
+            --out "${OUT}/analysis.json"
+
+      - name: STEP 3 — Weekly Brief + Compact Email 생성
+        run: |
+          set -uo pipefail
+          python3 -B "${GITHUB_WORKSPACE}/${PIPE}/build.py" \
+            --collected "${OUT}/collected.json" \
+            --analysis "${OUT}/analysis.json" \
+            --out-dir "${OUT}"
+
+      - name: STEP 4 — QA (14지표 + Critical C1~C7)
+        run: |
+          set -uo pipefail
+          python3 -B "${GITHUB_WORKSPACE}/${PIPE}/qa.py" \
+            --collected "${OUT}/collected.json" \
+            --analysis "${OUT}/analysis.json" \
+            --out-dir "${OUT}"
+
+      - name: STEP 5 — 발송 Gate (FAIL CLOSED)
+        id: gate
+        env:
+          WIB_RECIPIENT: ${{ secrets.WIB_RECIPIENT }}
+          GA3_CONFIRM_SEND: ${{ inputs.confirm_send }}
+          FORCE_RESEND: ${{ inputs.force_resend }}
+        run: |
+          set -uo pipefail
+          echo "runtime CLOUD_MODE 직접 조회 (send_gate.md §1-1-1 EVIDENCE RULE):"
+          printenv CLOUD_MODE && echo "  -> 값 있음" || echo "  -> 미설정 (LOCAL MODE)"
+          python3 -B "${GITHUB_WORKSPACE}/${PIPE}/gate.py" \
+            --weekly-id "${WEEKLY_ID}" \
+            --out-dir "${OUT}" \
+            --repo-root "${GITHUB_WORKSPACE}"
+
+      - name: STEP 6 — Gmail SMTP 테스트 발송 1통 (Gate 통과 시에만)
+        if: steps.gate.outputs.decision == 'SEND_TEST'
+        env:
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          WIB_RECIPIENT: ${{ secrets.WIB_RECIPIENT }}
+        run: |
+          set -uo pipefail
+          python3 -B "${GITHUB_WORKSPACE}/${PIPE}/gmail_send.py" --out-dir "${OUT}"
+
+      - name: STEP 6 (skipped) — 발송하지 않은 이유 기록
+        if: steps.gate.outputs.decision != 'SEND_TEST'
+        run: |
+          set -uo pipefail
+          echo "decision=${{ steps.gate.outputs.decision }} → 메일을 보내지 않았다."
+          {
+            echo "### STEP 6 — 발송"
+            echo ""
+            echo "- decision: \`${{ steps.gate.outputs.decision }}\`"
+            echo "- **발송 0통.** Brief · Email · QA 산출물만 남겼다."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts (Brief / Email / QA / Gate)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ga3-${{ inputs.weekly_id }}-output
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/ga3-out/*.md
+            ${{ runner.temp }}/ga3-out/*.html
+            ${{ runner.temp }}/ga3-out/*.json
+
+      - name: Guard — 저장소·기준선 무변경 확인
+        if: always()
+        run: |
+          set -uo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          echo "git status --porcelain:"
+          git status --porcelain | tee /tmp/ga3_status.txt
+          if [ -s /tmp/ga3_status.txt ]; then
+            echo "::error::워크스페이스가 변경되었다. GA-3 는 저장소를 쓰지 않는다."
+            exit 1
+          fi
+          echo "  -> 변경 0건 (기준선·원장·트래커 전부 무변경)"
+          echo "산출물 경로 (저장소 밖):"
+          ls -l "${OUT}" || true

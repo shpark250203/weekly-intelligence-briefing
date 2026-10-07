@@ -59,3 +59,8 @@ desktop.ini
 app_password*
 apppassword*
 *.apppass
+
+# ── Python 바이트코드 ───────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo

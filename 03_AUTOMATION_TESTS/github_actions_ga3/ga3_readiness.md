@@ -188,3 +188,98 @@ GA-3는 발송을 검증하는 단계가 아니다 — 그것은 GA-2C에서 이
 |---|---|
 | 2026-10-01 | 최초 작성. GA-2C PASS 기록 후 GA-3 준비 상태·블로커 2건·권고 순서 정리. **GA-3 미실행** |
 | 2026-10-01 | 순서 A 착수 — STEP 12 Gemini 프로브 workflow 신설(`gemini-probe.yml`). **미실행.** 블로커 ②(파이프라인 코드 0건)는 그대로 |
+| 2026-10-07 | STEP 12 PASS(`gemini-3.8-flash`) 확인 → 블로커 ① 해소. 파이프라인 9개 모듈 + GA-3 workflow 신설로 블로커 ② 해소. 발송 정책을 `[TEST]` 1통(사용자 확인 입력 필수)으로 확정. **§8 참조. GA-3 자체는 아직 미실행** |
+
+---
+
+## 8. GA-3 구현 (2026-10-07) — workflow·파이프라인 신설, **미실행**
+
+STEP 12 Gemini Probe 가 **최종 PASS**(`MODEL=gemini-3.8-flash`, HTTP 200 / 모델 사용 가능 /
+responseSchema / usageMetadata / Overall PASS)하고 Repository Variable `GEMINI_MODEL` 이
+등록되면서 §2 의 블로커 ①이 해소됐다. 이어서 블로커 ②(파이프라인 코드 0건)를 해소했다.
+
+### 8-1. 신설 파일
+
+| 경로 | 역할 | AI | 메일 | 저장소 쓰기 |
+|---|---|---|---|---|
+| `.github/workflows/ga3-weekly-brief-e2e.yml` | GA-3 수동 실행 workflow (`workflow_dispatch` 전용) | — | — | 없음 (`contents: read`) |
+| `04_PIPELINE/common.py` | 주차·커버리지·날짜 파싱·마스킹·IO | 0 | 0 | — |
+| `04_PIPELINE/sources.py` | Source 레지스트리 (GA-1 검증 경로 우선, Fallback 순서) | 0 | 0 | — |
+| `04_PIPELINE/collector.py` | STEP 1 수집 — robots 준수·커버리지 필터·Noise 규칙·기계적 중복 클러스터링 | **0** | 0 | 없음 |
+| `04_PIPELINE/gemini_client.py` | 호출 예산·RPM 페이싱·재시도 정책 강제 | 호출 지점 1곳 | 0 | — |
+| `04_PIPELINE/analyze.py` | STEP 2 — 7 호출 + 코드 측 재검증 | 7 | 0 | 없음 |
+| `04_PIPELINE/build.py` | STEP 3 — Weekly Brief(.md) + Compact Email(.html) | 0 | 0 | 러너 임시 디렉터리만 |
+| `04_PIPELINE/qa.py` | STEP 4 — QA 14지표 + Critical C1~C7 | 0 | 0 | 러너 임시 디렉터리만 |
+| `04_PIPELINE/gate.py` | STEP 5 — G0~G7 판정, FAIL CLOSED | 0 | 0 | 없음(원장은 **읽기만**) |
+| `04_PIPELINE/gmail_send.py` | STEP 6 — GA-2B/2C PASS 코드 그대로 재사용, 1통 | 0 | 1통(TEST) | 없음 |
+| `04_PIPELINE/selftest.py` | 네트워크·AI·SMTP 없이 규칙 93건 검증 | 0 | 0 | 없음 |
+
+### 8-2. 호출 예산 (사용자 GA-3 지시 반영)
+
+| 항목 | 값 | 강제 지점 |
+|---|---|---|
+| 정상 실행 목표 | **7 호출** | `analyze.py` 단계 구성 |
+| 권고 상한 | **8 호출** (재시도 1회 포함) | `RECOMMENDED_CAP` |
+| 절대 상한 | **10 호출** | `HARD_CAP` — 초과 요청은 호출 **전에** 거부 |
+| 재시도 | **503 / 429(분당 한도)만 1회** | `_retryable()` |
+| 429 일일 한도(RPD) · 구분 불가 | **재시도 없음, 즉시 중단** | 보수적 분류 |
+| 그 밖의 모든 오류 | **즉시 Fail Closed** | 400/401/403/404/500/네트워크/스키마 위반 |
+| RPM 5 준수 | 호출 간 **30초** 페이싱 | `PACE_SECONDS` |
+| Fallback 모델 | **사용하지 않는다** | 코드·Guard 양쪽에서 차단 |
+
+### 8-3. 발송 정책 — §3·§6 에서 **변경된 부분** (사용자 지시, 2026-10-07)
+
+| | 2026-10-01 준비안 | **GA-3 구현 (현재)** |
+|---|---|---|
+| 발송 | 하지 않는다 (G0 FAIL → `SKIPPED_LOCAL_MODE`) | **QA PASS 시 `[TEST]` 메일 1통** |
+| 근거 | — | `send_gate.md` §1-2 LOCAL MODE **수동 테스트 경로** (`[TEST]` 접두 + 본인 수신, 원장 Status=TEST → §4-3 중복 판정 대상 아님). GA-2C 와 같은 성격 |
+| 승인 | — | `workflow_dispatch` 입력 `confirm_send` 에 **사용자가 `SEND-TEST` 를 직접 입력**한 경우에만 |
+| `CLOUD_MODE` | 만들지 않는다 | **그대로 만들지 않는다.** `gate.py` 가 프로세스 환경변수를 **조회만** 하고 기록한다 |
+| 정식 발송 | GA-4 | **GA-4 — 이 코드에 정식 발송 경로가 없다** |
+
+발송 차단 Gate (하나라도 어긋나면 0통):
+`G1` Brief 생성 · `G2` Email 생성(인라인 스타일만) · `G3` **Critical QA FAIL = 0** ·
+`G4` `WIB_RECIPIENT` 단일 유효 주소 · `G6` 중복 확인 수행 · `G7` 같은 주차 정식 발송 기록 없음 ·
+`GC` 사용자 확인 문자열 일치. `G5`(SMTP AUTH)는 발송 단계에서 판정하며
+AUTH 가 PASS 가 아니면 발송 호출 자체를 하지 않는다.
+
+**남은 규격 공백**: `G6` 의 2중 확인 중 **Gmail 조회는 러너에서 불가**(SMTP 전용)하다.
+GA-3 는 Status=TEST 발송이라 §4-3 에 따라 중복 판정 대상이 아니므로 원장 확인만으로 진행한다.
+**정식 발송(GA-4)에서는 Gmail 조회 경로를 붙여 G6 을 완전히 충족시켜야 한다**
+(`ga2_auth_design.md` §3-5 와 같은 항목이다).
+
+### 8-4. 자체 점검 결과 (2026-10-07, 실행 전)
+
+| 점검 | 방법 | 결과 |
+|---|---|---|
+| Python 문법 | 9개 모듈 `py_compile` | **오류 0건** |
+| 규칙·Gate 로직 | `selftest.py` (네트워크·AI·SMTP 미사용) | **93건 PASS / 0 FAIL** |
+| 수집 파이프라인 | `http_get` 대체 주입 후 전 구간 실행 | 커버리지 필터·Noise·5단계 상태·클러스터링 정상 |
+| 전 구간 통합 | 가짜 Gemini 응답으로 analyze→build→qa→gate | **7 호출 / Critical FAIL 0 / decision=SEND_TEST** |
+| 미검증 숫자 삭제 | 발췌에 없는 수치를 투입 | `[수치 미검증]` 으로 치환 확인 |
+| Confidence 상한 | 계절성 위험 + High 요청 | **Medium 으로 강등** 확인 |
+| 발송 차단 | QA FAIL / 확인문자열 불일치 / SENT 기록 / 원장 없음 | 4경로 모두 **0통** |
+| Secret·수신주소 노출 | Guard 정적 검사(그렙) 로컬 재현 | **0건** |
+
+> 점검은 로컬에 Python 이 없어 **WASM(pyodide, Python 3.14)** 으로 실행했다.
+> 러너(ubuntu-24.04, Python 3.12)에서도 같은 검사가 **STEP 0a/0b 에서 먼저** 돌고,
+> 실패하면 수집·Gemini 호출·발송을 시작하지 않는다.
+> 네트워크 실제 접근(실 Source 응답)과 실제 Gemini 응답 품질은 **실행해야 확인된다.**
+
+### 8-5. 실행 방법 (사용자 수동)
+
+1. GitHub → Actions → **GA-3 Weekly Brief E2E (Manual)** → Run workflow
+2. `weekly_id` = `2026-W38` (기준선 비교 고정값)
+3. 메일 없이 산출물만 보려면 `confirm_send` 를 **비워 둔다** → `SKIPPED_NO_CONFIRM`
+4. 테스트 메일 1통까지 확인하려면 `confirm_send` = `SEND-TEST`
+5. 산출물은 Artifact `ga3-2026-W38-output` (`2026-W38_gemini.md` / `.html` /
+   `collected.json` / `analysis.json` / `qa.json` / `gate.json` / `send_result.json`)
+6. 같은 날 **2회까지만** 실행한다 (RPD 20 — 설계 §2-4)
+
+### 8-6. GA-3 가 여전히 하지 않는 것
+
+- 정기 `schedule` 등록 (GA-4)
+- `CLOUD_MODE` Variable 생성 (GA-4)
+- 정식 발송 (`[WEEKLY INTELLIGENCE]` 제목 · Status=SENT)
+- 기준선 파일·원장·트래커 CSV 쓰기 (workflow 마지막 Guard 가 `git status` 로 무변경 확인)
+- 합격선 하향 (§4 의 B1~B7 / N1~N5 그대로)
