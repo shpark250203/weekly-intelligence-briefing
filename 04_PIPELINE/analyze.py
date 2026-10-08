@@ -782,6 +782,41 @@ def run(weekly_id, collected, client, stats):
     return out
 
 
+def parse_diag_table(usage):
+    """구조화 출력 파싱 진단 표.
+
+    **raw 응답 본문은 넣지 않는다.** Secret·개인정보가 섞일 수 있는 값은 담지 않고,
+    구조만 보고 원인을 좁힐 수 있는 항목만 쓴다 (사용자 GA-3 지시 5).
+    """
+    d = usage.get("parse_diag")
+    if not d:
+        return ("#### 구조화 출력 진단\n\n"
+                "- 파싱 단계에 도달하지 못했다 (응답 수신 전 실패).\n")
+    rows = [
+        ("HTTP status", d.get("http_status")),
+        ("candidate count", d.get("candidate_count")),
+        ("parts count", d.get("parts_count")),
+        ("text_present", d.get("text_present")),
+        ("json_fence_detected", d.get("json_fence_detected")),
+        ("finish_reason", d.get("finish_reason") or "(없음)"),
+        ("parse_error_type", "`%s`" % (d.get("parse_error_type") or "(없음)")),
+        ("required_fields_missing",
+         ", ".join(d.get("required_fields_missing") or []) or "없음"),
+        ("실패 단계", "`%s`" % (d.get("stage") or "—")),
+        ("thought tokens", usage.get("thought_tokens")),
+        ("output tokens", usage.get("tokens_out")),
+    ]
+    out = ["#### 구조화 출력 진단 (raw 응답 미출력)", "",
+           "| 항목 | 값 |", "|---|---|"]
+    out += ["| %s | %s |" % (k, v) for k, v in rows]
+    out.append("")
+    if (d.get("parse_error_type") or "").startswith("TRUNCATED_OUTPUT_MAX_TOKENS"):
+        out.append("- `finishReason=MAX_TOKENS` — 응답이 **잘려서** JSON 이 "
+                   "닫히지 않았다. 파서 문제가 아니라 출력 토큰 상한 문제다.")
+        out.append("")
+    return "\n".join(out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--collected", required=True)
@@ -835,6 +870,7 @@ def main():
                usage.get("backoff_waits") or "없음",
                usage.get("calls"), usage.get("budget"), usage.get("hard_cap"))
         )
+        C.append_summary(parse_diag_table(usage))
         print("FAIL CLOSED: %s — %s" % (category, C.sanitize(detail)))
         return 2
 

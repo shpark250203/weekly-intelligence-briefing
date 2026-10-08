@@ -991,6 +991,156 @@ def test_model_fallback():
             os.environ.pop(key, None)
 
 
+# ── 5-C. 구조화 출력 파싱 (실제 호출 없음) ──────────────────────
+def envelope(parts, finish="STOP", usage=None):
+    """Gemini 응답 봉투를 흉내낸다. parts 는 그대로 넣는다."""
+    return 200, json.dumps({
+        "candidates": [{"finishReason": finish, "content": {"parts": parts}}],
+        "usageMetadata": usage or {"promptTokenCount": 1,
+                                   "candidatesTokenCount": 1,
+                                   "totalTokenCount": 2},
+    })
+
+
+def test_structured_output_parse():
+    os.environ["GEMINI_API_KEY"] = "selftest-not-a-real-key"
+    os.environ["GEMINI_MODEL"] = "selftest-primary"
+    os.environ["GEMINI_MODEL_FALLBACK"] = "selftest-fallback"
+    os.environ.pop("AI_CALL_BUDGET", None)
+    real_sleep = G.time.sleep
+    slept = []
+    G.time.sleep = lambda s: slept.append(s)
+    schema = {"type": "OBJECT", "required": ["items", "must_know"]}
+    payload = '{"items": [{"id": "A0001"}], "must_know": []}'
+    want = {"items": [{"id": "A0001"}], "must_know": []}
+
+    def client_returning(parts, finish="STOP", usage=None):
+        cl = G.GeminiClient(pace=0)
+        cl._post = lambda p, model=None: envelope(parts, finish, usage)
+        return cl
+
+    def run(parts, finish="STOP", usage=None):
+        cl = client_returning(parts, finish, usage)
+        try:
+            return cl, cl.generate("s", "i", "[]", schema), None
+        except G.GeminiFailClosed as exc:
+            return cl, None, exc
+
+    try:
+        # A. 정상 JSON
+        cl, out, err = run([{"text": payload}])
+        check("A: 정상 JSON parse", out == want and err is None, str(err))
+        check("A: 진단 text_present YES / fence NO",
+              cl.last_parse_diag["text_present"] == "YES"
+              and cl.last_parse_diag["json_fence_detected"] == "NO")
+
+        # B. ```json 코드펜스
+        cl, out, err = run([{"text": "```json\n" + payload + "\n```"}])
+        check("B: 코드펜스 JSON parse", out == want and err is None, str(err))
+        check("B: json_fence_detected YES",
+              cl.last_parse_diag["json_fence_detected"] == "YES")
+        _, out2, _ = run([{"text": "```\n" + payload + "\n```"}])
+        check("B: 언어 표기 없는 펜스도 벗긴다", out2 == want)
+        _, out3, _ = run([{"text": "```json " + payload + " ```"}])
+        check("B: 한 줄짜리 펜스도 벗긴다", out3 == want, str(out3))
+        # 펜스가 아닌데 벗기지 않는다 — 본문을 임의로 깎지 않는다
+        _, out4, _ = run([{"text": '{"items": [], "must_know": ["a```b"]}'}])
+        check("B: 본문 안의 ``` 는 건드리지 않는다",
+              out4 == {"items": [], "must_know": ["a```b"]}, str(out4))
+
+        # C. 앞뒤 whitespace
+        cl, out, err = run([{"text": "\n\n  \t" + payload + "  \n\n"}])
+        check("C: 앞뒤 공백 JSON parse", out == want and err is None, str(err))
+
+        # D. 필수 필드 누락 → Fail Closed (채워 넣지 않는다)
+        cl, out, err = run([{"text": '{"items": []}'}])
+        check("D: 필수 필드 누락은 Fail Closed",
+              out is None and err is not None
+              and err.category == "STRUCTURED_OUTPUT_REQUIRED_MISSING",
+              err and err.category)
+        check("D: 누락 필드를 이름으로 보고",
+              cl.last_parse_diag["required_fields_missing"] == ["must_know"],
+              str(cl.last_parse_diag["required_fields_missing"]))
+        check("D: 누락 필드를 만들어 채우지 않는다", out is None)
+
+        # E. 잘못된 JSON → Fail Closed
+        cl, out, err = run([{"text": '{"items": [ , ]'}])
+        check("E: 잘못된 JSON 은 Fail Closed",
+              out is None and err is not None
+              and err.category == "STRUCTURED_OUTPUT_PARSE_FAILED",
+              err and err.category)
+        check("E: parse_error_type 기록",
+              cl.last_parse_diag["parse_error_type"].startswith(
+                  "JSON_DECODE_ERROR:"),
+              cl.last_parse_diag["parse_error_type"])
+
+        # F. thought 파트를 본문에 섞지 않는다 (thinking 모델)
+        cl, out, err = run([
+            {"text": "먼저 기사 목록을 살펴보자.", "thought": True},
+            {"text": payload},
+        ])
+        check("F: thought 파트를 제외하고 parse", out == want and err is None,
+              str(err))
+        check("F: 전체 파트 수는 그대로 보고",
+              cl.last_parse_diag["parts_count"] == 2,
+              str(cl.last_parse_diag["parts_count"]))
+
+        # G. 잘린 응답(MAX_TOKENS)은 parse 실패와 구분해 기록한다
+        cl, out, err = run([{"text": '{"items": [{"id": "A00'}],
+                           finish="MAX_TOKENS")
+        check("G: 잘린 응답도 Fail Closed",
+              out is None and err.category == "STRUCTURED_OUTPUT_PARSE_FAILED",
+              err and err.category)
+        check("G: 잘림을 parse_error_type 으로 구분",
+              cl.last_parse_diag["parse_error_type"].startswith(
+                  "TRUNCATED_OUTPUT_MAX_TOKENS"),
+              cl.last_parse_diag["parse_error_type"])
+
+        # H. parse 실패는 재시도·fallback 하지 않는다 (503/429 와 구분)
+        for parts, finish in (([{"text": "not json"}], "STOP"),
+                              ([{"text": '{"items": []}'}], "STOP")):
+            slept.clear()
+            cl, out, err = run(parts, finish)
+            u = cl.usage()
+            check("H: parse 실패는 1회로 멈춘다 (재시도 0 / fallback NO)",
+                  u["attempts"] == 1 and u["retries"] == 0
+                  and u["fallback_triggered"] is False and slept == [],
+                  "attempts=%d retries=%d slept=%s"
+                  % (u["attempts"], u["retries"], slept))
+        check("H: parse 실패 category 는 재시도 대상이 아니다",
+              not G.GeminiClient._retryable("STRUCTURED_OUTPUT_PARSE_FAILED")
+              and not G.GeminiClient._retryable(
+                  "STRUCTURED_OUTPUT_REQUIRED_MISSING"))
+
+        # I. 빈 응답 / 후보 없음
+        cl, out, err = run([{"text": "   "}])
+        check("I: 본문이 비면 EMPTY_TEXT", err and err.category == "EMPTY_TEXT",
+              err and err.category)
+        cl, out, err = run([{"thought": True, "text": "생각만 했다"}])
+        check("I: thought 파트만 오면 EMPTY_TEXT",
+              err and err.category == "EMPTY_TEXT", err and err.category)
+
+        # J. 진단에 raw 응답·Secret 이 들어가지 않는다
+        cl, out, err = run([{"text": '{"items": [ , ]'}])
+        line = cl._diag_line()
+        check("J: 진단 한 줄에 raw 응답 본문이 없다",
+              '"items"' not in line and "{" not in line, line)
+        check("J: 진단 한 줄에 API Key 가 없다",
+              "selftest-not-a-real-key" not in line)
+        check("J: 진단에 필요한 항목이 모두 있다",
+              all(k in line for k in ("http=", "candidates=", "parts=",
+                                      "text_present=", "json_fence_detected=",
+                                      "parse_error_type=",
+                                      "required_fields_missing=")), line)
+        table = analyze.parse_diag_table(cl.usage())
+        check("J: Summary 표에 raw 응답이 없다",
+              "parse_error_type" in table and '"items"' not in table)
+    finally:
+        G.time.sleep = real_sleep
+        for key in ("GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_MODEL_FALLBACK"):
+            os.environ.pop(key, None)
+
+
 # ── 6·7. 조립 · QA · Gate ───────────────────────────────────────
 def fixture(weekly="2026-W38", good_url=True, misplace=False):
     start, end = C.coverage_window(weekly)
@@ -1253,6 +1403,7 @@ def main():
     test_budget()
     test_retry_loop()
     test_model_fallback()
+    test_structured_output_parse()
     test_build_qa_gate()
     print("")
     print("PASS %d / FAIL %d" % (len(PASS), len(FAIL)))

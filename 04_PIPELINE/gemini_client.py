@@ -67,6 +67,9 @@ MAX_BACKOFF_SECONDS = 180  # 서버 retryDelay 를 따르더라도 이 값을 �
 PACE_SECONDS = 30          # RPM 5 준수 (설계 2-2)
 MAX_PROMPT_CHARS = 120_000  # 호출당 입력 100K 토큰 상한의 보수적 환산
 MODEL_RE = re.compile(r"^[A-Za-z0-9.\-]{1,64}$")
+# ```json ... ``` 코드펜스. 응답 **전체**가 펜스로 감싸인 경우에만 벗긴다.
+FENCE_RE = re.compile(
+    r"\A\s*```[A-Za-z0-9_-]*[ \t]*(?:\r?\n)?(.*?)(?:\r?\n)?[ \t]*```\s*\Z", re.S)
 
 PER_MINUTE_HINTS = ("perminute", "per minute", "requests per minute", "rpm")
 PER_DAY_HINTS = ("perday", "per day", "requests per day", "daily limit", "rpd")
@@ -109,6 +112,9 @@ class GeminiClient:
         self.tokens_in = 0
         self.tokens_out = 0
         self.tokens_total = 0
+        self.thought_tokens = 0
+        # 구조화 출력 파싱 진단 (raw 응답은 담지 않는다 — 설계 2-6)
+        self.last_parse_diag = None
         self.log = []
         # Summary 표시용 — 시도 수 / 재시도 수 / 마지막 HTTP status / 마지막 category
         self.attempts = 0
@@ -261,31 +267,125 @@ class GeminiClient:
         self.model_used = model
         return raw
 
-    def _parse(self, stage, raw):
+    @staticmethod
+    def _text_parts(cand):
+        """후보에서 **본문 text 파트만** 모은다. (텍스트, 전체 파트 수)
+
+        thinking 계열 모델은 `"thought": true` 인 사고 요약 파트를 함께 돌려준다.
+        그것까지 이어 붙이면 `<사고 요약><JSON>` 이 되어 JSON 이 아니게 된다.
+        text 가 없는 파트(inlineData·functionCall 등)도 건너뛴다.
+        """
+        parts = ((cand.get("content") or {}).get("parts")) or []
+        kept = [p.get("text") or "" for p in parts
+                if isinstance(p, dict) and not p.get("thought") and p.get("text")]
+        return "".join(kept), len(parts)
+
+    @staticmethod
+    def _strip_fence(text):
+        """```json ... ``` 코드펜스만 벗긴다. (본문, 펜스였는가)
+
+        펜스 전체를 감싼 형태일 때만 벗긴다. 내용은 고치지 않는다.
+        """
+        m = FENCE_RE.match(text)
+        if m:
+            return m.group(1), True
+        return text, False
+
+    @staticmethod
+    def _missing_required(obj, schema):
+        """스키마 최상위 required 필드 중 응답에 없는 것. 채워 넣지 않는다."""
+        required = (schema or {}).get("required") or []
+        if not isinstance(obj, dict):
+            return list(required)
+        return [k for k in required if k not in obj]
+
+    def _parse(self, stage, raw, schema=None):
+        """응답 봉투 → 구조화 JSON. 실패하면 Fail Closed (추측해서 만들지 않는다).
+
+        진단값은 self.last_parse_diag 에 남긴다. **raw 응답 본문은 담지 않는다.**
+        """
+        diag = {
+            "stage": stage, "http_status": self.last_http_status,
+            "candidate_count": 0, "parts_count": 0,
+            "text_present": "NO", "json_fence_detected": "NO",
+            "finish_reason": "", "parse_error_type": "",
+            "required_fields_missing": [],
+        }
+        self.last_parse_diag = diag
         try:
             body = json.loads(raw)
-        except Exception:
+        except Exception as e:
+            diag["parse_error_type"] = "ENVELOPE_NOT_JSON:" + type(e).__name__
             self.last_category = "RESPONSE_NOT_JSON"
-            raise GeminiFailClosed("RESPONSE_NOT_JSON")
+            raise GeminiFailClosed("RESPONSE_NOT_JSON", self._diag_line())
         usage = body.get("usageMetadata") or {}
         self.tokens_in += int(usage.get("promptTokenCount") or 0)
         self.tokens_out += int(usage.get("candidatesTokenCount") or 0)
         self.tokens_total += int(usage.get("totalTokenCount") or 0)
+        self.thought_tokens += int(usage.get("thoughtsTokenCount") or 0)
         cands = body.get("candidates") or []
+        diag["candidate_count"] = len(cands)
         if not cands:
-            raise GeminiFailClosed("NO_CANDIDATES")
+            diag["parse_error_type"] = "NO_CANDIDATES"
+            self.last_category = "NO_CANDIDATES"
+            raise GeminiFailClosed("NO_CANDIDATES", self._diag_line())
         finish = (cands[0].get("finishReason") or "").upper()
+        diag["finish_reason"] = finish
         if finish and finish not in ("STOP", "MAX_TOKENS"):
             # SAFETY 등 — 내용을 지어내지 않는다.
-            raise GeminiFailClosed("FINISH_REASON_" + finish)
-        parts = (cands[0].get("content") or {}).get("parts") or []
-        text = "".join(p.get("text", "") for p in parts)
+            diag["parse_error_type"] = "FINISH_REASON_" + finish
+            self.last_category = "FINISH_REASON_" + finish
+            raise GeminiFailClosed("FINISH_REASON_" + finish, self._diag_line())
+
+        text, parts_count = self._text_parts(cands[0])
+        diag["parts_count"] = parts_count
+        diag["text_present"] = "YES" if text.strip() else "NO"
         if not text.strip():
-            raise GeminiFailClosed("EMPTY_TEXT")
+            diag["parse_error_type"] = "EMPTY_TEXT"
+            self.last_category = "EMPTY_TEXT"
+            raise GeminiFailClosed("EMPTY_TEXT", self._diag_line())
+
+        # 로컬 정규화 — 추가 호출 없이 같은 응답을 한 번 더 손질한다.
+        # 코드펜스 제거 + 앞뒤 공백 제거까지만 한다. 중괄호를 뒤져 "그럴듯한" JSON 을
+        # 오려내지 않는다 (잘린 응답을 성공으로 둔갑시킬 수 있다).
+        text, fenced = self._strip_fence(text)
+        diag["json_fence_detected"] = "YES" if fenced else "NO"
+        text = text.strip()
         try:
-            return json.loads(text)
-        except Exception:
-            raise GeminiFailClosed("STRUCTURED_OUTPUT_PARSE_FAILED")
+            out = json.loads(text)
+        except ValueError as e:
+            # 잘려서 안 되는 것(MAX_TOKENS)과 애초에 JSON 이 아닌 것을 구분해 둔다.
+            # **둘 다 재시도·fallback 대상이 아니다** — 분류만 나눈다.
+            diag["parse_error_type"] = (
+                ("TRUNCATED_OUTPUT_MAX_TOKENS:" if finish == "MAX_TOKENS"
+                 else "JSON_DECODE_ERROR:") + type(e).__name__
+            )
+            self.last_category = "STRUCTURED_OUTPUT_PARSE_FAILED"
+            raise GeminiFailClosed("STRUCTURED_OUTPUT_PARSE_FAILED",
+                                   self._diag_line())
+        missing = self._missing_required(out, schema)
+        diag["required_fields_missing"] = missing
+        if missing:
+            # 비어 있는 필드를 만들어 채우지 않는다 (설계 2-5).
+            diag["parse_error_type"] = "REQUIRED_FIELDS_MISSING"
+            self.last_category = "STRUCTURED_OUTPUT_REQUIRED_MISSING"
+            raise GeminiFailClosed("STRUCTURED_OUTPUT_REQUIRED_MISSING",
+                                   self._diag_line())
+        return out
+
+    def _diag_line(self):
+        """Summary·로그에 남길 한 줄 진단. raw 응답·Secret 은 담지 않는다."""
+        d = self.last_parse_diag or {}
+        return (
+            "stage=%s http=%s candidates=%s parts=%s text_present=%s "
+            "json_fence_detected=%s finish_reason=%s parse_error_type=%s "
+            "required_fields_missing=%s"
+            % (d.get("stage"), d.get("http_status"), d.get("candidate_count"),
+               d.get("parts_count"), d.get("text_present"),
+               d.get("json_fence_detected"), d.get("finish_reason") or "(없음)",
+               d.get("parse_error_type") or "(없음)",
+               ",".join(d.get("required_fields_missing") or []) or "(없음)")
+        )
 
     # ── 공개 API ─────────────────────────────────────────────────
     def generate(self, stage, instruction, data, schema, max_output_tokens=8192):
@@ -319,7 +419,7 @@ class GeminiClient:
                     print("   FALLBACK 모델로 1회 전환 (PRIMARY transient 2회 실패)",
                           flush=True)
                 raw = self._call_once(stage, payload, model)
-                out = self._parse(stage, raw)
+                out = self._parse(stage, raw, schema)
                 self.log.append({
                     "stage": stage, "result": "OK", "attempt": attempt + 1,
                     "model": model, "fallback": use_fallback,
@@ -379,6 +479,8 @@ class GeminiClient:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "tokens_total": self.tokens_total,
+            "thought_tokens": self.thought_tokens,
+            "parse_diag": self.last_parse_diag,
             "fallback_model_used": self.fallback_triggered,
             "log": self.log,
         }
