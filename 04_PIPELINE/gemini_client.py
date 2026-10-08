@@ -66,6 +66,14 @@ BACKOFF_SECONDS = (60, 120)
 MAX_BACKOFF_SECONDS = 180  # 서버 retryDelay 를 따르더라도 이 값을 넘지 않는다
 PACE_SECONDS = 30          # RPM 5 준수 (설계 2-2)
 MAX_PROMPT_CHARS = 120_000  # 호출당 입력 100K 토큰 상한의 보수적 환산
+# 구조화 출력 하한. thinking 토큰이 출력 예산을 함께 쓰므로, 상한이 낮으면
+# 사고 단계에서 예산이 소진돼 JSON 이 **닫히기 전에 잘린다**(finishReason=MAX_TOKENS).
+# 호출 단계가 더 큰 값을 주면 그대로 쓰고, 이보다 낮게는 내려가지 않는다.
+MIN_OUTPUT_TOKENS = 16384
+# 사고 예산 기본값. Variable `GEMINI_THINKING_BUDGET` 로 덮어쓸 수 있고,
+# `off`(또는 음수)면 thinkingConfig 를 아예 보내지 않는다 — 모델이 이 필드를
+# 거부할 때 코드 수정 없이 되돌리기 위한 탈출구다.
+DEFAULT_THINKING_BUDGET = 1024
 MODEL_RE = re.compile(r"^[A-Za-z0-9.\-]{1,64}$")
 # ```json ... ``` 코드펜스. 응답 **전체**가 펜스로 감싸인 경우에만 벗긴다.
 FENCE_RE = re.compile(
@@ -113,6 +121,10 @@ class GeminiClient:
         self.tokens_out = 0
         self.tokens_total = 0
         self.thought_tokens = 0
+        # 사고 예산 — Variable 주입. 비어 있으면 기본값, off/음수면 보내지 않는다.
+        self.thinking_budget = self._read_thinking_budget()
+        # 단계마다 상한이 다르다(선별 16384 / 작성 24576) — 실제 적용값을 모아 둔다.
+        self.out_token_values = []
         # 구조화 출력 파싱 진단 (raw 응답은 담지 않는다 — 설계 2-6)
         self.last_parse_diag = None
         self.log = []
@@ -128,6 +140,25 @@ class GeminiClient:
             raise GeminiFailClosed("MODEL_ID_INVALID")
 
     # ── 내부 ─────────────────────────────────────────────────────
+    @staticmethod
+    def _read_thinking_budget():
+        """사고 예산. None 이면 thinkingConfig 를 보내지 않는다.
+
+        미설정  -> DEFAULT_THINKING_BUDGET
+        정수    -> 그 값 (0 = 사고 끄기)
+        off/음수/해석 불가 -> None (필드 자체를 생략, 모델 기본값에 맡긴다)
+        """
+        raw = os.environ.get("GEMINI_THINKING_BUDGET", "").strip()
+        if not raw:
+            return DEFAULT_THINKING_BUDGET
+        if raw.lower() in ("off", "none", "unset"):
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_THINKING_BUDGET
+        return None if value < 0 else value
+
     def _sanitize(self, raw):
         return C.sanitize(raw, secrets=(self.api_key,))
 
@@ -373,6 +404,13 @@ class GeminiClient:
                                    self._diag_line())
         return out
 
+    def _out_token_label(self):
+        """실제 요청에 실린 출력 상한. 단계마다 다르면 범위로 보여 준다."""
+        if not self.out_token_values:
+            return "(요청 없음)"
+        lo, hi = min(self.out_token_values), max(self.out_token_values)
+        return str(lo) if lo == hi else "%d~%d" % (lo, hi)
+
     def _diag_line(self):
         """Summary·로그에 남길 한 줄 진단. raw 응답·Secret 은 담지 않는다."""
         d = self.last_parse_diag or {}
@@ -400,14 +438,21 @@ class GeminiClient:
         truncated = len(prompt) > MAX_PROMPT_CHARS
         if truncated:
             prompt = prompt[:MAX_PROMPT_CHARS]
+        # 출력 상한은 하한 아래로 내려가지 않는다. 호출 단계가 더 크게 주면 그대로 쓴다.
+        out_tokens = max(int(max_output_tokens or 0), MIN_OUTPUT_TOKENS)
+        self.out_token_values.append(out_tokens)
+        gen_cfg = {
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+            "maxOutputTokens": out_tokens,
+            "temperature": 0.2,
+        }
+        # 사고 예산을 묶어 두면 사고가 출력 예산을 다 먹고 JSON 이 잘리는 일을 막는다.
+        if self.thinking_budget is not None:
+            gen_cfg["thinkingConfig"] = {"thinkingBudget": self.thinking_budget}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": schema,
-                "maxOutputTokens": max_output_tokens,
-                "temperature": 0.2,
-            },
+            "generationConfig": gen_cfg,
         }
         # 시도 횟수는 구조적으로 MAX_ATTEMPTS_PER_STAGE(=3)로 고정된다.
         # 무한 루프·대기 루프를 만들지 않는다 (설계 2-5 금지사항 4).
@@ -480,6 +525,13 @@ class GeminiClient:
             "tokens_out": self.tokens_out,
             "tokens_total": self.tokens_total,
             "thought_tokens": self.thought_tokens,
+            "thinking_budget": ("(미설정 — 모델 기본값)"
+                                if self.thinking_budget is None
+                                else self.thinking_budget),
+            "max_output_tokens": self._out_token_label(),
+            "min_output_tokens": MIN_OUTPUT_TOKENS,
+            "finish_reason": ((self.last_parse_diag or {}).get("finish_reason")
+                              or "(없음)"),
             "parse_diag": self.last_parse_diag,
             "fallback_model_used": self.fallback_triggered,
             "log": self.log,

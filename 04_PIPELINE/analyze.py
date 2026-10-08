@@ -782,6 +782,25 @@ def run(weekly_id, collected, client, stats):
     return out
 
 
+def gemini_summary_rows(usage):
+    """Summary 표에 공통으로 들어가는 설정·토큰 행.
+
+    성공·FAIL CLOSED 양쪽에서 같은 값을 보여 준다 — 잘림(MAX_TOKENS)이
+    사고 예산·출력 상한과 어떻게 맞물렸는지 한 표에서 읽히게 하려는 것이다.
+    """
+    return (
+        "| **configured thinking budget** | **%s** |\n"
+        "| **configured max output tokens** | **%s** (하한 %s) |\n"
+        "| **thought_tokens** | %s |\n"
+        "| **output_tokens** | %s |\n"
+        "| **finish_reason** | **%s** |\n"
+        % (usage.get("thinking_budget"),
+           usage.get("max_output_tokens"), usage.get("min_output_tokens"),
+           usage.get("thought_tokens"), usage.get("tokens_out"),
+           usage.get("finish_reason"))
+    )
+
+
 def parse_diag_table(usage):
     """구조화 출력 파싱 진단 표.
 
@@ -856,6 +875,7 @@ def main():
             "| **final category** | **`%s`** |\n"
             "| **timeout seconds** | **%s** (단일 요청 상한) |\n"
             "| **backoff history** | %s |\n"
+            "%s"
             "| 소모한 호출 수 | %s / 예산 %s (절대 상한 %s) |\n"
             "| Brief 생성·발송 | **없음** |\n"
             % (usage.get("primary_model"), usage.get("fallback_model"),
@@ -868,6 +888,7 @@ def main():
                usage.get("final_category") or category,
                usage.get("timeout_seconds"),
                usage.get("backoff_waits") or "없음",
+               gemini_summary_rows(usage),
                usage.get("calls"), usage.get("budget"), usage.get("hard_cap"))
         )
         C.append_summary(parse_diag_table(usage))
@@ -894,6 +915,7 @@ def main():
         "| **final category** | **`%s`** |\n"
         "| **timeout seconds** | %s (단일 요청 상한) |\n"
         "| **backoff history** | %s |\n"
+        "%s"
         "| 호출 수 | **%d** / 예산 %d (절대 상한 %d) |\n"
         "| 토큰 (in/out/total) | %d / %d / %d |\n"
         "| 2-of-5 미달 제외 | %d |\n"
@@ -906,6 +928,7 @@ def main():
            u["max_attempts_per_stage"], u["backoff_schedule"],
            u["last_http_status"], u["final_category"] or "OK",
            u.get("timeout_seconds"), u["backoff_waits"] or "없음",
+           gemini_summary_rows(u),
            u["calls"], u["budget"], u["hard_cap"],
            u["tokens_in"], u["tokens_out"], u["tokens_total"],
            stats["excluded_by_rule"], stats["numbers_removed"],

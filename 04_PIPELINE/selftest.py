@@ -991,6 +991,106 @@ def test_model_fallback():
             os.environ.pop(key, None)
 
 
+# ── 5-B2. 사고 예산 · 출력 상한 (실제 호출 없음) ────────────────
+def test_thinking_and_output_budget():
+    os.environ["GEMINI_API_KEY"] = "selftest-not-a-real-key"
+    os.environ["GEMINI_MODEL"] = "selftest-primary"
+    os.environ.pop("GEMINI_MODEL_FALLBACK", None)
+    os.environ.pop("AI_CALL_BUDGET", None)
+    os.environ.pop("GEMINI_THINKING_BUDGET", None)
+
+    def capture(max_out=16384):
+        """payload 를 가로채 generationConfig 를 돌려준다 (호출 없음)."""
+        cl = G.GeminiClient(pace=0)
+        seen = {}
+
+        def _post(payload, model=None):
+            seen.update(payload)
+            return ok_response()
+
+        cl._post = _post
+        cl.generate("s", "i", "[]", {"type": "OBJECT"},
+                    max_output_tokens=max_out)
+        return cl, seen["generationConfig"]
+
+    try:
+        # 기본값 — thinkingBudget 1024 가 실제 payload 에 실린다
+        cl, cfg = capture()
+        check("thinkingConfig 가 요청에 실린다", "thinkingConfig" in cfg, str(cfg))
+        check("thinkingBudget 기본값 1024",
+              cfg.get("thinkingConfig", {}).get("thinkingBudget") == 1024,
+              str(cfg.get("thinkingConfig")))
+        check("responseSchema 는 계속 쓴다",
+              "responseSchema" in cfg and
+              cfg["responseMimeType"] == "application/json")
+        check("maxOutputTokens 16384", cfg["maxOutputTokens"] == 16384,
+              str(cfg["maxOutputTokens"]))
+        u = cl.usage()
+        check("usage 에 configured thinking budget",
+              u["thinking_budget"] == 1024, str(u["thinking_budget"]))
+        check("usage 에 configured max output tokens",
+              u["max_output_tokens"] == "16384" and u["min_output_tokens"] == 16384,
+              str(u["max_output_tokens"]))
+        check("usage 에 finish_reason", u["finish_reason"] == "STOP",
+              str(u["finish_reason"]))
+        check("usage 에 thought_tokens / output_tokens",
+              "thought_tokens" in u and "tokens_out" in u)
+
+        # 하한 — 호출 단계가 낮게 줘도 16384 아래로 내려가지 않는다
+        _, cfg_low = capture(max_out=8192)
+        check("출력 상한 하한 16384 적용", cfg_low["maxOutputTokens"] == 16384,
+              str(cfg_low["maxOutputTokens"]))
+        check("generate 기본 인자도 하한 이상",
+              G.MIN_OUTPUT_TOKENS == 16384)
+        # 더 큰 값은 그대로 둔다 (W38 품질 기준 유지)
+        clh, cfg_hi = capture(max_out=24576)
+        check("더 큰 상한은 그대로 둔다", cfg_hi["maxOutputTokens"] == 24576,
+              str(cfg_hi["maxOutputTokens"]))
+        # 단계마다 상한이 다르면 범위로 보고한다
+        clh.generate("s2", "i", "[]", {"type": "OBJECT"}, max_output_tokens=8192)
+        check("단계별 상한이 다르면 범위로 보고",
+              clh.usage()["max_output_tokens"] == "16384~24576",
+              str(clh.usage()["max_output_tokens"]))
+
+        # Variable 주입
+        os.environ["GEMINI_THINKING_BUDGET"] = "512"
+        _, cfg512 = capture()
+        check("Variable 로 사고 예산 주입",
+              cfg512["thinkingConfig"]["thinkingBudget"] == 512,
+              str(cfg512.get("thinkingConfig")))
+        os.environ["GEMINI_THINKING_BUDGET"] = "0"
+        _, cfg0 = capture()
+        check("0 이면 사고 끄기로 보낸다",
+              cfg0["thinkingConfig"]["thinkingBudget"] == 0,
+              str(cfg0.get("thinkingConfig")))
+        # 탈출구 — 모델이 필드를 거부할 때 코드 수정 없이 끌 수 있다
+        for raw in ("off", "-1", "none"):
+            os.environ["GEMINI_THINKING_BUDGET"] = raw
+            clx, cfgx = capture()
+            check("`%s` 면 thinkingConfig 를 보내지 않는다" % raw,
+                  "thinkingConfig" not in cfgx, str(cfgx.keys()))
+            check("`%s` 면 Summary 에 미설정으로 표기" % raw,
+                  clx.usage()["thinking_budget"].startswith("(미설정"),
+                  str(clx.usage()["thinking_budget"]))
+        os.environ["GEMINI_THINKING_BUDGET"] = "말이안되는값"
+        _, cfg_bad = capture()
+        check("해석 불가 값은 기본값으로 떨어진다",
+              cfg_bad["thinkingConfig"]["thinkingBudget"] == 1024,
+              str(cfg_bad.get("thinkingConfig")))
+
+        # Summary 표에 5개 항목이 실제로 찍히는지
+        os.environ.pop("GEMINI_THINKING_BUDGET", None)
+        cl, _ = capture()
+        text = analyze.gemini_summary_rows(cl.usage())
+        for label in ("configured thinking budget", "configured max output tokens",
+                      "thought_tokens", "output_tokens", "finish_reason"):
+            check("Summary 행 존재: %s" % label, label in text, text[:120])
+    finally:
+        for key in ("GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_MODEL_FALLBACK",
+                    "GEMINI_THINKING_BUDGET"):
+            os.environ.pop(key, None)
+
+
 # ── 5-C. 구조화 출력 파싱 (실제 호출 없음) ──────────────────────
 def envelope(parts, finish="STOP", usage=None):
     """Gemini 응답 봉투를 흉내낸다. parts 는 그대로 넣는다."""
@@ -1403,6 +1503,7 @@ def main():
     test_budget()
     test_retry_loop()
     test_model_fallback()
+    test_thinking_and_output_budget()
     test_structured_output_parse()
     test_build_qa_gate()
     print("")
