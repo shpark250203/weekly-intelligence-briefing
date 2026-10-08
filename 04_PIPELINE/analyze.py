@@ -248,6 +248,53 @@ def issue_row(issue, by_id):
     }
 
 
+def interleave_by_media(rows, key):
+    """매체별로 돌아가며 1건씩 뽑아 다시 늘어놓는다 (round-robin).
+
+    왜 필요한가 — 입력은 Source 등록 순서대로 쌓여 있다. 상한(건수·글자 수)에
+    걸려 **앞에서부터 잘리면** 뒤쪽 매체가 통째로 사라진다. 그러면 CLAUDE.md 5장의
+    "5개 전문매체 중 최소 3개 이상 반영" 목표와 C3 가 데이터가 아니라 등록 순서에
+    좌우된다.
+
+    **상한값도 선별 기준도 바꾸지 않는다. 순서만 바꾼다.**
+    같은 매체 안에서는 들어온 순서를 그대로 지킨다.
+    """
+    groups = {}
+    order = []
+    for r in rows:
+        name = key(r)
+        if name not in groups:
+            groups[name] = []
+            order.append(name)
+        groups[name].append(r)
+    out, depth = [], 0
+    while len(out) < len(rows):
+        progressed = False
+        for name in order:
+            g = groups[name]
+            if depth < len(g):
+                out.append(g[depth])
+                progressed = True
+        if not progressed:
+            break
+        depth += 1
+    return out
+
+
+def cap_issues_by_media(issues, limit):
+    """AXIS 2 이슈 수 상한 — 매체를 돌아가며 남긴다.
+
+    상한값은 cap_issues 와 같다. 각 매체 안에서는 기존과 똑같이
+    Tier 가 높은(권위 있는) 쪽 · 먼저 보도된 쪽을 우선한다.
+    """
+    if len(issues) <= limit:
+        return issues, 0
+    ranked = sorted(issues, key=lambda x: (x["tier"], x["published"]))
+    keep_ids = {i["id"] for i in
+                interleave_by_media(ranked, lambda x: x["source_name"])[:limit]}
+    return [i for i in issues if i["id"] in keep_ids], len(issues) - limit
+
+
 def cap_issues(issues, limit):
     """이슈 수 상한. Tier 가 높은(권위 있는) 순서로 남긴다."""
     if len(issues) <= limit:
@@ -490,7 +537,12 @@ def run(weekly_id, collected, client, stats):
 
     general_pool = [i for i in items
                     if i["axis"] in ("AXIS1", "TIER1") and not i["noise"]][:140]
-    beauty_pool = [i for i in items if i["axis"] == "BEAUTY" and not i["noise"]][:80]
+    # AXIS 2 후보는 **매체를 돌아가며** 늘어놓은 뒤 상한을 적용한다. 등록 순서대로
+    # 앞에서 자르면 뒤쪽 매체(코스모닝·코스인코리아)가 모델 입력에 아예 닿지 못한다.
+    beauty_pool = interleave_by_media(
+        [i for i in items if i["axis"] == "BEAUTY" and not i["noise"]],
+        lambda x: x["source_name"],
+    )[:80]
 
     # 호출 1 — AXIS 1 선별 + 병합
     print("CALL 1/7 — AXIS 1 선별+병합 (%d건)" % len(general_pool))
@@ -537,7 +589,7 @@ def run(weekly_id, collected, client, stats):
     # 작성 단계 입력은 이슈 수·글자 수 양쪽으로 상한을 둔다. 상한을 넘은 이슈는
     # 브리프에서도 함께 제외한다 — 본문 없이 제목만 남는 항목을 만들지 않기 위함이다.
     general_issues, drop_g = cap_issues(general_issues, 45)
-    beauty_issues, drop_b = cap_issues(beauty_issues, 35)
+    beauty_issues, drop_b = cap_issues_by_media(beauty_issues, 35)
     a1_rows = [issue_row(i, by_id) for i in general_issues]
     a1_rows, drop_g2 = cap_by_chars(a1_rows, 70_000)
     general_issues = filter_by_rows(general_issues, a1_rows)
@@ -566,7 +618,9 @@ def run(weekly_id, collected, client, stats):
                           "issues_dropped_over_cap": drop_g + drop_g2})
 
     # 호출 4 — AXIS 2 심층 작성
-    a2_rows = [issue_row(i, by_id) for i in beauty_issues]
+    # 글자 수 상한도 앞에서부터 자른다 — 여기서도 매체를 돌아가며 넣는다.
+    a2_rows = interleave_by_media(
+        [issue_row(i, by_id) for i in beauty_issues], lambda r: r["src"])
     a2_rows, drop_b2 = cap_by_chars(a2_rows, 70_000)
     beauty_issues = filter_by_rows(beauty_issues, a2_rows)
     print("CALL 4/7 — AXIS 2 심층 작성 (%d 이슈)" % len(beauty_issues))

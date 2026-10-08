@@ -173,6 +173,39 @@ def test_parsers():
     check("발췌 길이 상한 준수", len(ex) <= 301, str(len(ex)))
     check("발췌에 태그가 남지 않는다", "<" not in ex)
 
+    # 사이트 머리글(네비·날씨 위젯)이 발췌가 되지 않는다 — C3 회귀 방지.
+    # 코스인코리아 구조: <title> 은 매체명뿐이고 진짜 제목은 og:title 에 있으며
+    # 본문은 id="news_body_area" 안에 있다.
+    chrome_page = (
+        '<html><head><title>화장품 뷰티 전문 미디어 코스인코리아닷컴</title>'
+        '<meta property="og:title" content="아모레퍼시픽, 3분기 수출 1,200억원">'
+        '</head><body><div class="header">주메뉴 바로가기 즐겨찾기 맑음 서울 28.9℃ '
+        '맑음 부산 28.8℃ 기상청 제공 뉴스레터 신청 로그인</div>'
+        '<div id="news_body_area" class="smartOutput">아모레퍼시픽이 3분기 해외 '
+        '매출 1,200억원을 기록했다고 18일 밝혔다. 전년 동기 대비 13.5% 늘었다.</div>'
+        "</body></html>"
+    )
+    got = collector.fetch_article_from_html(
+        chrome_page, "https://x.example.org/a", dt.date(2026, 9, 18))
+    check("og:title 을 기사 제목으로 쓴다",
+          got and got["title"] == "아모레퍼시픽, 3분기 수출 1,200억원",
+          got and got["title"])
+    check("발췌에 사이트 머리글(날씨·메뉴)이 들어가지 않는다",
+          "기상청" not in got["excerpt"] and "로그인" not in got["excerpt"],
+          got["excerpt"][:80])
+    check("발췌에 기사 본문이 들어간다", "1,200억원" in got["excerpt"],
+          got["excerpt"][:80])
+    body, anchored = collector.main_content(chrome_page)
+    check("본문 컨테이너를 찾으면 anchored=True", anchored)
+    check("컨테이너가 없으면 anchored=False",
+          collector.main_content("<html><body><p>본문</p></body></html>")[1]
+          is False)
+    check("itemprop=articleBody 컨테이너도 인식한다",
+          collector.main_content(
+              '<html><body><div class="ad">광고</div>'
+              '<div itemprop="articleBody">진짜 본문 1,200억원</div></body></html>'
+          )[1] is True)
+
     text = collector._decode("한글 본문".encode("utf-8"),
                              "text/html; charset=utf-8")
     check("Content-Type charset 디코딩", "한글" in text)
@@ -294,6 +327,127 @@ def test_window_pagination():
               any("페이지 날짜 탐색" in n for n in note4), str(note4))
     finally:
         collector.http_get, collector.robots_allowed = real_get, real_robots
+
+
+# ── 2-C. 일시적 실패 내성 (C3 회귀 방지) ────────────────────────
+def test_transient_resilience():
+    """페이지 1건이 일시적으로 실패해도 매체를 통째로 잃지 않는다.
+
+    예전에는 지수 탐색 중 한 페이지만 실패해도 탐색을 중단하고 1페이지(최신 목록)로
+    떨어져, 과거 주차 기사가 0건이 되었다. 그 결과 반영 매체 수가 줄어 C3 가 FAIL 했다.
+    """
+    real_get, real_robots = collector.http_get, collector.robots_allowed
+    real_once = collector.http_get_once
+    try:
+        src = {
+            "id": "fake", "name": "FAKE", "axis": "BEAUTY", "country": "KR",
+            "tier": 3, "kind": "list", "max_pages": 24, "max_articles": 12,
+            "urls": ["https://fake.example.org/list"],
+            "page_url": "https://fake.example.org/list?page={page}",
+            "article_res": [r"/news/articleView\.html\?idxno=\d+"],
+        }
+        start, end = C.coverage_window("2026-W38")
+
+        # 1) 지수 탐색이 밟는 페이지(2·4·8…) 중 하나가 통째로 실패해도 도달한다
+        pagemap = fake_site()
+        install_fake_site(pagemap)
+        base_get = collector.http_get
+
+        def flaky(url):
+            if "page=4" in url:
+                return 0, url, "", "TIMEOUT"
+            return base_get(url)
+
+        collector.http_get = flaky
+        items, _, status, note = collector.collect_list(src, start, end)
+        check("탐색 중 1페이지 실패해도 과거 주차에 도달",
+              any(C.in_window(i["published"], start, end) for i in items),
+              status)
+        check("건너뛴 페이지를 기록",
+              any("건너뜀" in n for n in note), str(note))
+
+        # 2) 날짜를 읽지 못한 페이지도 탐색을 중단시키지 않는다
+        install_fake_site(pagemap)
+        base_get2 = collector.http_get
+
+        def undated_page(url):
+            if "page=2" in url:
+                return 200, url, "<html><body>점검 중입니다</body></html>", ""
+            return base_get2(url)
+
+        collector.http_get = undated_page
+        items2, _, status2, _ = collector.collect_list(src, start, end)
+        check("날짜 판독 불가 페이지가 있어도 과거 주차에 도달",
+              any(C.in_window(i["published"], start, end) for i in items2),
+              status2)
+
+        # 3) http_get 은 일시적 실패만 1회 재시도한다 (차단·404 는 재시도 없음)
+        collector.http_get = real_get
+        seen = []
+
+        def once(url):
+            seen.append(url)
+            if "flap" in url:
+                return (200, url, "ok", "") if len(seen) > 1 else (0, url, "", "TIMEOUT")
+            if "robots" in url:
+                return 0, url, "", "ROBOTS_DISALLOW"
+            return 404, url, "", "HTTP_404"
+
+        collector.http_get_once = once
+        collector.RETRY_DELAY = 0
+        code, _, text, _ = collector.http_get("https://x.example.org/flap")
+        check("일시적 실패는 1회 재시도한다", code == 200 and text == "ok",
+              "code=%s tries=%d" % (code, len(seen)))
+        seen.clear()
+        collector.http_get("https://x.example.org/robots")
+        check("robots 차단은 재시도하지 않는다", len(seen) == 1, str(len(seen)))
+        seen.clear()
+        collector.http_get("https://x.example.org/missing")
+        check("404 는 재시도하지 않는다", len(seen) == 1, str(len(seen)))
+        check("500 / 429 / 네트워크 오류만 일시적으로 본다",
+              collector.is_transient(503, "") and collector.is_transient(429, "")
+              and collector.is_transient(0, "TIMEOUT")
+              and not collector.is_transient(404, "HTTP_404")
+              and not collector.is_transient(403, "HTTP_403")
+              and not collector.is_transient(0, "ROBOTS_DISALLOW"))
+    finally:
+        collector.http_get, collector.robots_allowed = real_get, real_robots
+        collector.http_get_once = real_once
+        collector.RETRY_DELAY = 2.0
+
+
+# ── 2-D. Beauty 매체 균형 (C3 회귀 방지) ────────────────────────
+def test_beauty_media_balance():
+    """상한에 걸려 잘려도 매체가 통째로 사라지지 않는다. 상한값은 그대로다."""
+    rows = ([{"id": "A%03d" % n, "src": "장업신문"} for n in range(1, 41)]
+            + [{"id": "B%03d" % n, "src": "CMN"} for n in range(1, 31)]
+            + [{"id": "C%03d" % n, "src": "코스모닝"} for n in range(1, 31)]
+            + [{"id": "D%03d" % n, "src": "코스인코리아"} for n in range(1, 31)])
+    head = {r["src"] for r in rows[:80]}
+    mixed = analyze.interleave_by_media(rows, lambda r: r["src"])
+    check("기존 머리 자르기는 뒤쪽 매체를 잃는다 (문제 재현)", len(head) < 4,
+          str(sorted(head)))
+    check("매체 교차 배열 후 상한 80 에서 4개 매체가 모두 남는다",
+          len({r["src"] for r in mixed[:80]}) == 4,
+          str(sorted({r["src"] for r in mixed[:80]})))
+    check("교차 배열이 건수를 바꾸지 않는다", len(mixed) == len(rows))
+    check("교차 배열이 항목을 바꾸지 않는다",
+          {r["id"] for r in mixed} == {r["id"] for r in rows})
+    check("같은 매체 안에서는 들어온 순서를 지킨다",
+          [r["id"] for r in mixed if r["src"] == "CMN"]
+          == [r["id"] for r in rows if r["src"] == "CMN"])
+
+    issues = [{"id": r["id"], "source_name": r["src"], "tier": 3,
+               "published": "2026-09-%02d" % (15 + (n % 5))}
+              for n, r in enumerate(rows)]
+    kept, dropped = analyze.cap_issues_by_media(issues, 35)
+    check("이슈 상한값은 그대로 35", len(kept) == 35 and dropped == len(issues) - 35,
+          "kept=%d dropped=%d" % (len(kept), dropped))
+    check("이슈 상한 후에도 4개 매체가 모두 남는다",
+          len({i["source_name"] for i in kept}) == 4,
+          str(sorted({i["source_name"] for i in kept})))
+    check("상한 이하이면 아무것도 버리지 않는다",
+          analyze.cap_issues_by_media(issues[:10], 35) == (issues[:10], 0))
 
 
 def test_feed_paging_and_datescan():
@@ -1091,6 +1245,8 @@ def main():
     test_filters()
     test_parsers()
     test_window_pagination()
+    test_transient_resilience()
+    test_beauty_media_balance()
     test_feed_paging_and_datescan()
     test_selection_and_numbers()
     test_signal_and_price()

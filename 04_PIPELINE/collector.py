@@ -49,6 +49,7 @@ UA = (
 TIMEOUT = 25
 MAX_BYTES = 1_500_000
 POLITE_DELAY = 1.2
+RETRY_DELAY = 2.0          # 일시적 실패 1회 재시도 간격 (초)
 EXCERPT_LIMIT = 2000
 
 CHALLENGE_RE = re.compile(
@@ -70,6 +71,28 @@ META_DATE_RES = [
         re.I,
     ),
     re.compile(r"<time[^>]+datetime=[\"']([^\"']+)", re.I),
+]
+OG_TITLE_RES = [
+    re.compile(r"<meta[^>]+(?:property|name)=[\"'](?:og:title|twitter:title)[\"']"
+               r"[^>]+content=[\"']([^\"']+)", re.I),
+    re.compile(r"<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+(?:property|name)="
+               r"[\"'](?:og:title|twitter:title)[\"']", re.I),
+]
+# 기사 본문 컨테이너 — 앞에 있는 것부터 찾는다 (표준 표시가 가장 믿을 만하다).
+BODY_ANCHOR_RES = [
+    # 1) schema.org 표준 표시 — 장업신문 등 국내 뉴스 CMS 다수가 붙인다.
+    re.compile(r"<(?:article|div|section)\b[^>]*itemprop=[\"']articleBody[\"']"
+               r"[^>]*>", re.I),
+    # 2) 흔한 id/class 이름 (article-veiw-body 의 철자는 해당 CMS 원본 그대로다)
+    re.compile(
+        r"<(?:article|div|section)\b[^>]*(?:id|class)=[\"'][^\"']*"
+        r"(?:article-view-content-div|article-veiw-body|article-view-body|"
+        r"news_body|news-body|newsbody|article_body|article-body|articlebody|"
+        r"view_body|viewbody|cnt_view|smartoutput|article_txt|news_txt|"
+        r"content_view|article_view|articleview|entry-content)"
+        r"[^\"']*[\"'][^>]*>",
+        re.I,
+    ),
 ]
 BYLINE_DATE_RE = re.compile(
     r"(?:입력|등록|승인|작성|기사입력|발행|公開|更新|Published)[^0-9]{0,12}"
@@ -141,8 +164,37 @@ def robots_allowed(url):
     return robots_allowed_impl(url)
 
 
+def is_transient(status, note):
+    """일시적 실패인가 — 한 번 더 요청해 볼 가치가 있는 응답만 True.
+
+    차단(robots / 403 / 봇 화면)과 없는 문서(404)는 재시도하지 않는다.
+    우회가 아니라, 네트워크 한 번 흔들렸다고 매체 하나를 통째로 잃지 않기 위함이다.
+    """
+    if status in (429,) or 500 <= status <= 599:
+        return True
+    if status == 0 and note not in ("ROBOTS_DISALLOW", "SCHEME_NOT_ALLOWED"):
+        return True            # URL_ERROR_* / TIMEOUT / ERROR_*
+    return False
+
+
 def http_get(url):
-    """(status, final_url, text, note) — 예외를 던지지 않는다."""
+    """(status, final_url, text, note) — 예외를 던지지 않는다.
+
+    일시적 실패는 **1회만** 더 시도한다 (RETRY_DELAY 초 간격).
+    재시도해도 실패하면 그 사실을 그대로 돌려준다 — 숨기지 않는다.
+    """
+    status, final, text, note = http_get_once(url)
+    if is_transient(status, note):
+        time.sleep(RETRY_DELAY)
+        status2, final2, text2, note2 = http_get_once(url)
+        if not is_transient(status2, note2):
+            return status2, final2, text2, note2
+        return status2, final2, text2, (note2 or note) + "_RETRIED"
+    return status, final, text, note
+
+
+def http_get_once(url):
+    """단일 요청. (status, final_url, text, note) — 예외를 던지지 않는다."""
     parts = urllib.parse.urlsplit(url)
     if parts.scheme not in ("http", "https"):
         return 0, url, "", "SCHEME_NOT_ALLOWED"
@@ -336,12 +388,41 @@ def extract_published(html):
     return None
 
 
+def main_content(html):
+    """(본문 영역, 컨테이너를 찾았는가). 찾지 못하면 (껍데기 제거본, False).
+
+    왜 필요한가 — 본문 컨테이너를 집지 않으면 페이지 머리의 네비게이션·날씨
+    위젯이 발췌가 된다. 코스인코리아가 실제로 그랬고, 그 매체 기사 27건의 발췌가
+    전부 사이트 메뉴여서 선별 단계에서 통째로 탈락했다 (반영 매체 수 감소 → C3 FAIL).
+    """
+    if not html:
+        return html, False
+    body = re.sub(r"(?is)<(script|style|nav|header|footer|aside)[^>]*>.*?</\1>",
+                  " ", html)
+    for rx in BODY_ANCHOR_RES:
+        m = rx.search(body)
+        if m:
+            return body[m.end():m.end() + 40_000], True
+    return body, False
+
+
 def make_excerpt(title, html_or_text, limit=EXCERPT_LIMIT):
     """제목 + 리드 + 숫자가 있는 문장. 본문 전체를 넣지 않는다 (설계 2-2)."""
-    text = C.strip_tags(html_or_text) if "<" in (html_or_text or "") else (
-        html_or_text or ""
-    )
+    html_in = "<" in (html_or_text or "")
+    anchored = False
+    if html_in:
+        body, anchored = main_content(html_or_text)
+        text = C.strip_tags(body)
+    else:
+        text = html_or_text or ""
     text = re.sub(r"\s+", " ", text).strip()
+    # 본문 컨테이너를 못 찾은 페이지(CMN 등)는 사이트 머리글이 리드가 되어 버린다.
+    # 제목이 본문 앞에 다시 나오는 구조라면 거기서부터 읽는다 — 페이지에 실제로
+    # 있는 문자열만 쓴다.
+    if html_in and not anchored and title:
+        at = text.find(title)
+        if at > 0 and len(text) - at >= 400:
+            text = text[at:]
     lead = text[:900]
     rest = text[900:9000]
     numeric = []
@@ -404,6 +485,42 @@ def page_url(src, page):
     return tpl.replace("{page}", str(page))
 
 
+def article_title(html, label="", fallback_heading=False):
+    """기사 제목. 우선순위 og:title → <title> → (본문 heading) → 목록 라벨.
+
+    <title> 이 매체명뿐인 사이트(코스인코리아)가 있어 <title> 만 믿지 않는다.
+    후보는 모두 **그 페이지·목록에 실제로 있는 문자열**이다 — 만들어내지 않는다.
+    """
+    for rx in OG_TITLE_RES:
+        m = rx.search(html)
+        if m:
+            cand = C.strip_tags(m.group(1)).strip()
+            if len(cand) >= 10:
+                return C.truncate(cand, 140)
+    title = ""
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    if m:
+        cand = C.strip_tags(m.group(1))
+        # "매체명 :: 제목" / "제목 | 매체명" 형태에서 가장 긴 조각을 제목으로 본다.
+        parts = [p.strip() for p in re.split(r"\s*(?:::|\||>)\s*", cand)
+                 if p.strip()]
+        if parts:
+            cand = max(parts, key=len)
+        cand = re.sub(r"\s*-\s*[^-]{0,20}$", "", cand).strip()
+        if len(cand) >= 10:
+            title = cand
+    if fallback_heading:
+        # 기관 페이지는 <title> 이 기관명뿐인 경우가 많다 — 본문 제목(h1~h3)을 쓴다.
+        h = re.search(r"<h[1-3][^>]*>(.*?)</h[1-3]>", html, re.I | re.S)
+        if h:
+            head = C.strip_tags(h.group(1)).strip()
+            if len(head) > len(title):
+                title = head
+    if not title:
+        title = (label or "").strip()
+    return C.truncate(title, 140) if title else ""
+
+
 def fetch_article(url, label, note):
     """기사 1건을 읽어 (title, published, excerpt) 를 만든다. 실패하면 None."""
     code, final, html, err = http_get(url)
@@ -411,24 +528,9 @@ def fetch_article(url, label, note):
         note.append("기사 요청 실패 %s" % (err or code))
         return None
     when = extract_published(html)
-    # 제목은 기사 페이지의 <title> 을 우선한다. 목록 라벨은 리드 문장이 붙어 오는
-    # 경우가 있어 보조로만 쓴다.
-    title = ""
-    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-    if m:
-        cand = C.strip_tags(m.group(1))
-        # "매체명 :: 제목" / "제목 | 매체명" 형태에서 가장 긴 조각을 제목으로 본다.
-        parts = [p.strip() for p in re.split(r"\s*(?:::|\||>)\s*", cand) if p.strip()]
-        if parts:
-            cand = max(parts, key=len)
-        cand = re.sub(r"\s*-\s*[^-]{0,20}$", "", cand).strip()
-        if len(cand) >= 10:
-            title = cand
-    if not title:
-        title = (label or "").strip()
+    title = article_title(html, label)
     if not title:
         return None
-    title = C.truncate(title, 140)
     return {"title": title, "url": final, "published": when,
             "excerpt": make_excerpt(title, html), "dated": when is not None}
 
@@ -491,33 +593,43 @@ def find_window_page(src, start, end, note, attempts, ref_year, max_pages):
         return 1, first
 
     # 지수 탐색 — 구간에 닿는 페이지를 넘어설 때까지 2배씩 건너뛴다.
+    #
+    # 한 페이지가 비거나(일시적 실패) 날짜 표기가 없다고 해서 탐색을 **중단하지
+    # 않는다.** 예전에는 중단 후 (None, None) 을 돌려줬고, 그러면 collect_list 가
+    # 1페이지(최신 목록)로 떨어져 과거 주차 기사를 0건으로 만들었다. 매체 하나가
+    # 통째로 사라지면서 C3(반영 매체 3곳 이상)가 흔들린 원인이 이것이다.
+    # 이제는 그 페이지만 건너뛰고 다음 배수로 계속 간다.
     lo, hi, hi_rows = 1, None, None
+    skipped = 0
     probe = 2
     while probe <= max_pages:
         rows = fetch_list_page(src, page_url(src, probe), note, attempts, ref_year)
-        if not rows:
-            break
-        _, _, p_median = span_of(rows)
+        _, _, p_median = span_of(rows) if rows else (None, None, None)
         if p_median is None:
-            break
+            skipped += 1
+            probe *= 2
+            continue           # 이 페이지만 건너뛴다 — 탐색은 계속한다
         if p_median <= end:
             hi, hi_rows = probe, rows
             break
         lo = probe
         probe *= 2
+    if skipped:
+        note.append("지수 탐색 중 판독 불가 페이지 %d건 건너뜀 (탐색은 계속)" % skipped)
     if hi is None:
         note.append("페이지 상한(%d) 안에서 커버리지 구간에 닿지 못했다" % max_pages)
         return None, None
 
     # 이분 탐색 — 조건을 만족하는 가장 앞 페이지.
+    # 여기서도 판독 불가 페이지는 건너뛰고 범위를 좁혀 나간다. 이미 찾아 둔 hi 는
+    # 유효한 상한이므로, 최악의 경우에도 hi 로 되돌아갈 뿐 매체를 잃지 않는다.
     while lo + 1 < hi:
         mid = (lo + hi) // 2
         rows = fetch_list_page(src, page_url(src, mid), note, attempts, ref_year)
-        if not rows:
-            break
-        _, _, p_median = span_of(rows)
+        _, _, p_median = span_of(rows) if rows else (None, None, None)
         if p_median is None:
-            break
+            lo = mid           # 판독 못한 페이지는 구간 밖으로 보고 좁힌다
+            continue
         if p_median <= end:
             hi, hi_rows = mid, rows
         else:
@@ -745,20 +857,9 @@ def collect_datescan(src, start, end):
 
 def fetch_article_from_html(html, url, day):
     import datetime as _dt
-    title = ""
-    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-    if m:
-        title = re.sub(r"\s*[|<>-]\s*[^|]{0,40}$", "",
-                       C.strip_tags(m.group(1))).strip()
-    # 기관 페이지는 <title> 이 기관명뿐인 경우가 많다 — 본문 제목(h1~h3)을 쓴다.
-    h = re.search(r"<h[1-3][^>]*>(.*?)</h[1-3]>", html, re.I | re.S)
-    if h:
-        head = C.strip_tags(h.group(1)).strip()
-        if len(head) > len(title):
-            title = head
+    title = article_title(html, fallback_heading=True)
     if not title:
         return None
-    title = C.truncate(title, 140)
     when = extract_published(html) or _dt.datetime(
         day.year, day.month, day.day, 12, 0, tzinfo=C.KST)
     return {"title": title, "url": url, "published": when,
